@@ -13,6 +13,30 @@
 | `MAX_MAILBOXES` | `10000` | 内存中保留的最大邮箱数（LRU 淘汰） |
 | `CREATE_TOKEN` | — | 可选，设置后创建邮箱接口需携带 `Authorization: <token>` |
 
+## DNS 配置
+
+### 主域名模式
+
+邮箱格式：`random10@example.com`，将根域名的 MX 记录指向本服务：
+
+```
+example.com.   MX   10   example.com.
+```
+
+### 子域名模式（泛域名）
+
+邮箱格式：`random10@random8.example.com`，需要通配符 MX 记录：
+
+```
+*.example.com.   MX   10   example.com.
+```
+
+> 部分 DNS 服务商不支持通配符 MX，请确认你的 DNS 提供商支持 `*` 通配符记录。
+
+### 多域名
+
+`MAIL_DOMAIN` 支持逗号分隔多个域名，如 `example.com,example.org`，每个域名单独配置对应的 MX 记录。
+
 ## 快速启动
 
 ```bash
@@ -34,7 +58,13 @@ GET /mailbox
 POST /mailbox
 ```
 
-请求体（可选）：
+请求体（可选 JSON）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `domain` | string | 指定邮箱域名，不填则从 `MAIL_DOMAIN` 随机选取 |
+| `type` | string | `"maindomain"`（默认）或 `"subdomain"` |
+
 ```json
 { "domain": "example.com", "type": "subdomain" }
 ```
