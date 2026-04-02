@@ -41,18 +41,6 @@ func (s *smtpSession) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 	if len(parts) != 2 {
 		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "Invalid recipient"}
 	}
-	domain := parts[1]
-
-	domainAllowed := false
-	for _, d := range s.backend.cfg.MailDomains {
-		if domain == d || strings.HasSuffix(domain, "."+d) {
-			domainAllowed = true
-			break
-		}
-	}
-	if !domainAllowed {
-		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "Domain not accepted"}
-	}
 
 	if !s.backend.ms.Exists(to) {
 		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "Mailbox does not exist"}
