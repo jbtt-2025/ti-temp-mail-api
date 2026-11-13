@@ -1,13 +1,12 @@
 package main
 
-// Email stored in Email_Store
+// Email stored in EmailStore
 type Email struct {
 	ID               string `json:"_id"`
 	ReceivedAt       int64  `json:"receivedAt"` // Unix timestamp
 	Mailbox          string `json:"mailbox"`
 	From             string `json:"from"`
 	Subject          string `json:"subject"`
-	BodyText         string `json:"-"`
 	BodyHTML         string `json:"bodyHtml"`
 	AttachmentsCount int    `json:"attachmentsCount"`
 }

@@ -17,7 +17,10 @@ func main() {
 	}
 
 	ms := NewMailboxStore(cfg.MaxMailboxes)
-	es := NewEmailStore(cfg.MaxEmails)
+	es := NewEmailStore(cfg.MaxEmails, cfg.MaxEmailMemory)
+
+	log.Printf("Limits: maxMailboxes=%d maxEmails=%d maxEmailMemory=%dB maxMessageBytes=%dB",
+		cfg.MaxMailboxes, cfg.MaxEmails, cfg.MaxEmailMemory, maxMessageBytes)
 
 	httpServer := NewHTTPServer(cfg, ms, es)
 	smtpServer := NewSMTPServer(cfg, ms, es)

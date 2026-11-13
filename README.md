@@ -9,9 +9,12 @@
 | `MAIL_DOMAIN` | — | **必填**，逗号分隔的接受域名列表，如 `example.com,mail.example.com` |
 | `SMTP_PORT` | `25` | SMTP 服务器监听端口 |
 | `HTTP_PORT` | `8080` | HTTP API 服务器监听端口 |
-| `MAX_EMAILS` | `10000` | 内存中保留的最大邮件数（LRU 淘汰） |
+| `MAX_EMAILS` | `10000` | 内存中保留的最大邮件数（`0` 表示不限制条数，按接收时间淘汰最早邮件） |
+| `MAX_EMAIL_MEMORY` | `100MB` | 内存中保留的邮件总大小上限（支持 `B`/`KB`/`MB`/`GB` 或纯数字字节数，`0` 表示不限制总大小；按接收时间淘汰最早邮件） |
 | `MAX_MAILBOXES` | `10000` | 内存中保留的最大邮箱数（LRU 淘汰） |
 | `CREATE_TOKEN` | — | 可选，设置后创建邮箱接口需携带 `Authorization: <token>` |
+
+> 单封 SMTP 邮件大小上限固定为 `20MB`，超限将拒绝接收。
 
 ## DNS 配置
 

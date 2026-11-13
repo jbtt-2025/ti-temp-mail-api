@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"sync"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -9,20 +10,33 @@ import (
 type MailboxStore struct {
 	mu      sync.RWMutex
 	byToken *lru.Cache[string, string] // token → mailbox
-	byAddr  *lru.Cache[string, string] // mailbox → token
+	byAddr  map[string]string          // mailbox → token
 }
 
 func NewMailboxStore(capacity int) *MailboxStore {
-	t, _ := lru.New[string, string](capacity)
-	a, _ := lru.New[string, string](capacity)
-	return &MailboxStore{byToken: t, byAddr: a}
+	if capacity <= 0 {
+		capacity = 1
+	}
+	s := &MailboxStore{
+		byAddr: make(map[string]string),
+	}
+	s.byToken, _ = lru.NewWithEvict[string, string](capacity, func(_ string, mailbox string) {
+		delete(s.byAddr, mailbox)
+	})
+	return s
 }
 
 func (s *MailboxStore) Set(token, mailbox string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if oldMailbox, ok := s.byToken.Peek(token); ok && oldMailbox != mailbox {
+		delete(s.byAddr, oldMailbox)
+	}
+	if oldToken, ok := s.byAddr[mailbox]; ok && oldToken != token {
+		s.byToken.Remove(oldToken)
+	}
 	s.byToken.Add(token, mailbox)
-	s.byAddr.Add(mailbox, token)
+	s.byAddr[mailbox] = token
 }
 
 func (s *MailboxStore) GetByToken(token string) (string, bool) {
@@ -34,39 +48,136 @@ func (s *MailboxStore) GetByToken(token string) (string, bool) {
 func (s *MailboxStore) GetByAddr(mailbox string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.byAddr.Get(mailbox)
+	token, ok := s.byAddr[mailbox]
+	return token, ok
 }
 
 func (s *MailboxStore) Exists(mailbox string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.byAddr.Contains(mailbox)
+	_, ok := s.byAddr[mailbox]
+	return ok
+}
+
+// emailEntryOverheadBytes approximates per-entry struct, map, heap, and index slice overhead.
+const emailEntryOverheadBytes int64 = 256
+
+type emailEntry struct {
+	email *Email
+	size  int64
+	seq   uint64
+	index int
+}
+
+type emailHeap []*emailEntry
+
+func (h emailHeap) Len() int { return len(h) }
+
+func (h emailHeap) Less(i, j int) bool {
+	if h[i].email.ReceivedAt != h[j].email.ReceivedAt {
+		return h[i].email.ReceivedAt < h[j].email.ReceivedAt
+	}
+	return h[i].seq < h[j].seq
+}
+
+func (h emailHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *emailHeap) Push(x any) {
+	entry := x.(*emailEntry)
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *emailHeap) Pop() any {
+	old := *h
+	n := len(old)
+	entry := old[n-1]
+	old[n-1] = nil
+	entry.index = -1
+	*h = old[:n-1]
+	return entry
+}
+
+func emailMemoryBytes(e *Email) int64 {
+	return emailEntryOverheadBytes +
+		int64(len(e.ID)) +
+		int64(len(e.Mailbox)) +
+		int64(len(e.From)) +
+		int64(len(e.Subject)) +
+		int64(len(e.BodyHTML))
 }
 
 type EmailStore struct {
-	mu     sync.RWMutex
-	byID   *lru.Cache[string, *Email] // emailID → Email
-	byMbox map[string][]string        // mailbox → []emailID (descending by receivedAt)
+	mu         sync.RWMutex
+	maxCount   int
+	maxBytes   int64
+	totalBytes int64
+	seq        uint64
+	byID       map[string]*emailEntry // emailID → entry
+	byMbox     map[string][]string    // mailbox → []emailID (descending by receivedAt)
+	order      emailHeap              // min-heap ordered by (receivedAt, seq)
 }
 
-func NewEmailStore(capacity int) *EmailStore {
-	c, _ := lru.New[string, *Email](capacity)
-	return &EmailStore{byID: c, byMbox: make(map[string][]string)}
+func NewEmailStore(maxCount int, maxBytes int64) *EmailStore {
+	return &EmailStore{
+		maxCount: maxCount,
+		maxBytes: maxBytes,
+		byID:     make(map[string]*emailEntry),
+		byMbox:   make(map[string][]string),
+	}
 }
 
-func (s *EmailStore) Add(email *Email) {
+// Add inserts an email and evicts the oldest emails by ReceivedAt (then insertion order)
+// until both maxCount and maxBytes limits are satisfied. Returns false if the email
+// itself exceeds maxBytes and cannot be stored.
+func (s *EmailStore) Add(email *Email) bool {
+	if email == nil {
+		return false
+	}
+
+	size := emailMemoryBytes(email)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.byID.Add(email.ID, email)
+
+	if s.maxBytes > 0 && size > s.maxBytes {
+		return false
+	}
+
+	if existing, ok := s.byID[email.ID]; ok {
+		s.removeEntryLocked(existing)
+	}
+
+	for s.order.Len() > 0 &&
+		((s.maxCount > 0 && len(s.byID) >= s.maxCount) ||
+			(s.maxBytes > 0 && s.totalBytes+size > s.maxBytes)) {
+		oldest := heap.Pop(&s.order).(*emailEntry)
+		s.removeEntryLocked(oldest)
+	}
+
+	entry := &emailEntry{
+		email: email,
+		size:  size,
+		seq:   s.seq,
+	}
+	s.seq++
+	heap.Push(&s.order, entry)
+	s.byID[email.ID] = entry
+	s.totalBytes += size
+
 	ids := s.byMbox[email.Mailbox]
 	inserted := false
 	for i, id := range ids {
-		if e, ok := s.byID.Peek(id); ok && e.ReceivedAt < email.ReceivedAt {
-			newIds := make([]string, len(ids)+1)
-			copy(newIds, ids[:i])
-			newIds[i] = email.ID
-			copy(newIds[i+1:], ids[i:])
-			s.byMbox[email.Mailbox] = newIds
+		if existing, ok := s.byID[id]; ok && existing.email.ReceivedAt <= email.ReceivedAt {
+			newIDs := make([]string, len(ids)+1)
+			copy(newIDs, ids[:i])
+			newIDs[i] = email.ID
+			copy(newIDs[i+1:], ids[i:])
+			s.byMbox[email.Mailbox] = newIDs
 			inserted = true
 			break
 		}
@@ -74,12 +185,45 @@ func (s *EmailStore) Add(email *Email) {
 	if !inserted {
 		s.byMbox[email.Mailbox] = append(ids, email.ID)
 	}
+	return true
+}
+
+func (s *EmailStore) removeEntryLocked(entry *emailEntry) {
+	if entry.index >= 0 {
+		heap.Remove(&s.order, entry.index)
+	}
+	delete(s.byID, entry.email.ID)
+	s.totalBytes -= entry.size
+
+	ids := s.byMbox[entry.email.Mailbox]
+	for i := len(ids) - 1; i >= 0; i-- {
+		if ids[i] == entry.email.ID {
+			if len(ids) == 1 {
+				delete(s.byMbox, entry.email.Mailbox)
+			} else {
+				copy(ids[i:], ids[i+1:])
+				ids[len(ids)-1] = ""
+				ids = ids[:len(ids)-1]
+				if cap(ids) > 16 && len(ids)*4 <= cap(ids) {
+					shrunk := make([]string, len(ids))
+					copy(shrunk, ids)
+					ids = shrunk
+				}
+				s.byMbox[entry.email.Mailbox] = ids
+			}
+			break
+		}
+	}
 }
 
 func (s *EmailStore) GetByID(id string) (*Email, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.byID.Get(id)
+	entry, ok := s.byID[id]
+	if !ok {
+		return nil, false
+	}
+	return entry.email, true
 }
 
 func (s *EmailStore) ListByMailbox(mailbox string) []*Email {
@@ -88,9 +232,21 @@ func (s *EmailStore) ListByMailbox(mailbox string) []*Email {
 	ids := s.byMbox[mailbox]
 	result := make([]*Email, 0, len(ids))
 	for _, id := range ids {
-		if e, ok := s.byID.Peek(id); ok {
-			result = append(result, e)
+		if entry, ok := s.byID[id]; ok {
+			result = append(result, entry.email)
 		}
 	}
 	return result
+}
+
+func (s *EmailStore) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.byID)
+}
+
+func (s *EmailStore) TotalBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.totalBytes
 }

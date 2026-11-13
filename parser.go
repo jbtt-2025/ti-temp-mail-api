@@ -10,7 +10,6 @@ import (
 type ParsedEmail struct {
 	From             string
 	Subject          string
-	BodyText         string
 	BodyHTML         string
 	AttachmentsCount int
 }
@@ -27,7 +26,6 @@ func ParseMIME(rawData []byte) (*ParsedEmail, error) {
 	return &ParsedEmail{
 		From:             env.GetHeader("From"),
 		Subject:          env.GetHeader("Subject"),
-		BodyText:         env.Text,
 		BodyHTML:         env.HTML,
 		AttachmentsCount: len(env.Attachments),
 	}, nil

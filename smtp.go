@@ -12,6 +12,8 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 )
 
+const maxMessageBytes int64 = 20 * 1024 * 1024 // 20MB
+
 type smtpBackend struct {
 	cfg *Config
 	ms  *MailboxStore
@@ -21,7 +23,6 @@ type smtpBackend struct {
 type smtpSession struct {
 	backend *smtpBackend
 	rcptTo  string
-	buf     bytes.Buffer
 }
 
 func (b *smtpBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
@@ -51,11 +52,14 @@ func (s *smtpSession) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 }
 
 func (s *smtpSession) Data(r io.Reader) error {
-	s.buf.Reset()
-	if _, err := io.Copy(&s.buf, r); err != nil {
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, io.LimitReader(r, maxMessageBytes+1)); err != nil {
 		return err
 	}
-	rawData := s.buf.Bytes()
+	if int64(buf.Len()) > maxMessageBytes {
+		return gosmtp.ErrDataTooLarge
+	}
+	rawData := buf.Bytes()
 
 	parsed, parseErr := ParseMIME(rawData)
 	if parseErr != nil {
@@ -68,17 +72,22 @@ func (s *smtpSession) Data(r io.Reader) error {
 		Mailbox:          s.rcptTo,
 		From:             parsed.From,
 		Subject:          parsed.Subject,
-		BodyText:         parsed.BodyText,
 		BodyHTML:         parsed.BodyHTML,
 		AttachmentsCount: parsed.AttachmentsCount,
 	}
-	s.backend.es.Add(email)
+	if !s.backend.es.Add(email) {
+		log.Printf("SMTP: message for %s exceeds email memory limit (%d bytes)", s.rcptTo, emailMemoryBytes(email))
+		return &gosmtp.SMTPError{
+			Code:         552,
+			EnhancedCode: gosmtp.EnhancedCode{5, 3, 4},
+			Message:      "Message exceeds server email memory limit",
+		}
+	}
 	return nil
 }
 
 func (s *smtpSession) Reset() {
 	s.rcptTo = ""
-	s.buf.Reset()
 }
 
 func (s *smtpSession) Logout() error {
@@ -98,6 +107,7 @@ func NewSMTPServer(cfg *Config, ms *MailboxStore, es *EmailStore) *gosmtp.Server
 	s := gosmtp.NewServer(be)
 	s.Addr = fmt.Sprintf(":%d", cfg.SMTPPort)
 	s.Domain = "localhost"
+	s.MaxMessageBytes = maxMessageBytes
 	s.AllowInsecureAuth = true
 	return s
 }

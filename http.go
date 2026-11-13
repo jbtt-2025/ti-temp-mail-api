@@ -277,7 +277,7 @@ func buildMainHTML(domain string) string {
     <ul>
       <li>token 在创建邮箱时获取，用于后续所有请求的鉴权</li>
       <li>token 缺失或无效返回 <code>401</code>，邮件不存在或不属于该邮箱返回 <code>404</code></li>
-      <li>邮件数据存储在内存中（LRU），重启后清空</li>
+      <li>邮件数据存储在内存中（按时间、条数及总内存上限淘汰），重启后清空</li>
     </ul>
   </div>
 </body>
