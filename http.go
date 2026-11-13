@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	mathrand "math/rand"
 	"net/http"
 )
@@ -28,7 +29,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorResponse{Error: msg})
 }
 
-func NewHTTPServer(cfg *Config, ms *MailboxStore, es *EmailStore) *http.Server {
+func NewHTTPServer(cfg *Config, store Store) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -41,16 +42,16 @@ func NewHTTPServer(cfg *Config, ms *MailboxStore, es *EmailStore) *http.Server {
 		w.Write([]byte(buildMainHTML(cfg.MailDomains[0])))
 	})
 	mux.HandleFunc("GET /mailbox", func(w http.ResponseWriter, r *http.Request) {
-		handleCreateMailbox(w, r, cfg, ms)
+		handleCreateMailbox(w, r, cfg, store)
 	})
 	mux.HandleFunc("POST /mailbox", func(w http.ResponseWriter, r *http.Request) {
-		handleCreateMailbox(w, r, cfg, ms)
+		handleCreateMailbox(w, r, cfg, store)
 	})
 	mux.HandleFunc("GET /messages", func(w http.ResponseWriter, r *http.Request) {
-		handleListMessages(w, r, ms, es)
+		handleListMessages(w, r, store)
 	})
 	mux.HandleFunc("GET /messages/{id}", func(w http.ResponseWriter, r *http.Request) {
-		handleGetMessage(w, r, ms, es)
+		handleGetMessage(w, r, store)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Not Found")
@@ -67,7 +68,7 @@ type createMailboxRequest struct {
 	Type   string `json:"type"`
 }
 
-func handleCreateMailbox(w http.ResponseWriter, r *http.Request, cfg *Config, ms *MailboxStore) {
+func handleCreateMailbox(w http.ResponseWriter, r *http.Request, cfg *Config, store Store) {
 	// Check CREATE_TOKEN if set
 	if cfg.CreateToken != "" {
 		if r.Header.Get("Authorization") != cfg.CreateToken {
@@ -88,8 +89,9 @@ func handleCreateMailbox(w http.ResponseWriter, r *http.Request, cfg *Config, ms
 		domain = cfg.MailDomains[mathrand.Intn(len(cfg.MailDomains))]
 	}
 
-	// Generate mailbox address with up to 10 retries
+	// Generate mailbox address and persist atomically with up to 10 retries
 	var mailbox string
+	var token string
 	for i := 0; i < 10; i++ {
 		var addr string
 		if req.Type == "subdomain" {
@@ -97,8 +99,16 @@ func handleCreateMailbox(w http.ResponseWriter, r *http.Request, cfg *Config, ms
 		} else {
 			addr = fmt.Sprintf("%s@%s", randString(10), domain)
 		}
-		if !ms.Exists(addr) {
+		candidateToken := newUUID()
+		created, err := store.CreateMailbox(r.Context(), candidateToken, addr)
+		if err != nil {
+			log.Printf("HTTP: CreateMailbox error: %v", err)
+			writeError(w, http.StatusInternalServerError, "Internal server error")
+			return
+		}
+		if created {
 			mailbox = addr
+			token = candidateToken
 			break
 		}
 	}
@@ -108,24 +118,35 @@ func handleCreateMailbox(w http.ResponseWriter, r *http.Request, cfg *Config, ms
 		return
 	}
 
-	token := newUUID()
-	ms.Set(token, mailbox)
-
 	writeJSON(w, http.StatusCreated, CreateMailboxResponse{
 		Token:   token,
 		Mailbox: mailbox,
 	})
 }
 
-func handleListMessages(w http.ResponseWriter, r *http.Request, ms *MailboxStore, es *EmailStore) {
+func handleListMessages(w http.ResponseWriter, r *http.Request, store Store) {
 	token := r.Header.Get("Authorization")
-	mailbox, ok := ms.GetByToken(token)
-	if !ok || token == "" {
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "Unauthorized: Invalid or missing token.")
+		return
+	}
+	mailbox, ok, err := store.GetMailboxByToken(r.Context(), token)
+	if err != nil {
+		log.Printf("HTTP: GetMailboxByToken error: %v", err)
+		writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "Unauthorized: Invalid or missing token.")
 		return
 	}
 
-	emails := es.ListByMailbox(mailbox)
+	emails, err := store.ListEmailsByMailbox(r.Context(), mailbox)
+	if err != nil {
+		log.Printf("HTTP: ListEmailsByMailbox error: %v", err)
+		writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
 	summaries := make([]MessageSummary, 0, len(emails))
 	for _, e := range emails {
 		summaries = append(summaries, MessageSummary{
@@ -144,16 +165,30 @@ func handleListMessages(w http.ResponseWriter, r *http.Request, ms *MailboxStore
 	})
 }
 
-func handleGetMessage(w http.ResponseWriter, r *http.Request, ms *MailboxStore, es *EmailStore) {
+func handleGetMessage(w http.ResponseWriter, r *http.Request, store Store) {
 	token := r.Header.Get("Authorization")
-	mailbox, ok := ms.GetByToken(token)
-	if !ok || token == "" {
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "Unauthorized: Invalid or missing token.")
+		return
+	}
+	mailbox, ok, err := store.GetMailboxByToken(r.Context(), token)
+	if err != nil {
+		log.Printf("HTTP: GetMailboxByToken error: %v", err)
+		writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "Unauthorized: Invalid or missing token.")
 		return
 	}
 
 	id := r.PathValue("id")
-	email, ok := es.GetByID(id)
+	email, ok, err := store.GetEmailByID(r.Context(), id)
+	if err != nil {
+		log.Printf("HTTP: GetEmailByID error: %v", err)
+		writeError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
 	if !ok || email.Mailbox != mailbox {
 		writeError(w, http.StatusNotFound, "Message not found or access denied.")
 		return
@@ -277,7 +312,7 @@ func buildMainHTML(domain string) string {
     <ul>
       <li>token 在创建邮箱时获取，用于后续所有请求的鉴权</li>
       <li>token 缺失或无效返回 <code>401</code>，邮件不存在或不属于该邮箱返回 <code>404</code></li>
-      <li>邮件数据存储在内存中（按时间、条数及总内存上限淘汰），重启后清空</li>
+      <li>默认使用内存存储（按时间、条数及总内存上限淘汰，重启后清空），也支持 SQLite / MySQL / PostgreSQL / Cloudflare D1 持久化与独立过期回收</li>
     </ul>
   </div>
 </body>

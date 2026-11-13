@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseByteSize(t *testing.T) {
@@ -92,6 +93,106 @@ func TestLoadConfig(t *testing.T) {
 		t.Setenv("MAIL_DOMAIN", " , ")
 		if _, err := LoadConfig(); err == nil {
 			t.Fatal("expected error for empty domain entries")
+		}
+	})
+}
+
+func TestParseDuration(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"0", 0, false},
+		{"30m", 30 * time.Minute, false},
+		{"24h", 24 * time.Hour, false},
+		{"7d", 7 * 24 * time.Hour, false},
+		{"1.5d", 36 * time.Hour, false},
+		{"", 0, true},
+		{"-1h", 0, true},
+		{"-2d", 0, true},
+		{"bad", 0, true},
+	}
+	for _, tc := range tests {
+		got, err := parseDuration(tc.input)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseDuration(%q) err=%v, wantErr=%v", tc.input, err, tc.wantErr)
+			continue
+		}
+		if !tc.wantErr && got != tc.want {
+			t.Errorf("parseDuration(%q) = %v, want %v", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestLoadConfig_StorageModes(t *testing.T) {
+	t.Run("sqlite with independent TTLs and zero memory limits", func(t *testing.T) {
+		t.Setenv("MAIL_DOMAIN", "example.com")
+		t.Setenv("STORAGE_TYPE", "sqlite")
+		t.Setenv("SQLITE_PATH", "data/test.db")
+		t.Setenv("MAX_EMAILS", "0")
+		t.Setenv("MAX_EMAIL_MEMORY", "0")
+		t.Setenv("MAILBOX_TTL", "7d")
+		t.Setenv("EMAIL_TTL", "12h")
+		t.Setenv("CLEANUP_INTERVAL", "2m")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig failed: %v", err)
+		}
+		if cfg.StorageType != "sqlite" || cfg.DBDSN != "data/test.db" {
+			t.Fatalf("unexpected storage config: %+v", cfg)
+		}
+		if cfg.MailboxTTL != 7*24*time.Hour || cfg.EmailTTL != 12*time.Hour || cfg.CleanupInterval != 2*time.Minute {
+			t.Fatalf("unexpected TTL/cleanup config: %+v", cfg)
+		}
+	})
+
+	t.Run("pg alias requires DB_DSN", func(t *testing.T) {
+		t.Setenv("MAIL_DOMAIN", "example.com")
+		t.Setenv("STORAGE_TYPE", "pg")
+		t.Setenv("DB_DSN", "")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("expected error when DB_DSN missing for pg")
+		}
+
+		t.Setenv("DB_DSN", "host=localhost dbname=test")
+		cfg, err := LoadConfig()
+		if err != nil || cfg.StorageType != "postgres" {
+			t.Fatalf("expected postgres storage type, got %v, err=%v", cfg, err)
+		}
+	})
+
+	t.Run("d1 requires url and token", func(t *testing.T) {
+		t.Setenv("MAIL_DOMAIN", "example.com")
+		t.Setenv("STORAGE_TYPE", "d1")
+		t.Setenv("D1_API_URL", "https://example.workers.dev/")
+		t.Setenv("D1_API_TOKEN", "")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("expected error when D1_API_TOKEN missing")
+		}
+
+		t.Setenv("D1_API_TOKEN", "secret")
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig failed: %v", err)
+		}
+		if cfg.D1APIURL != "https://example.workers.dev" {
+			t.Fatalf("expected trailing slash trimmed, got %q", cfg.D1APIURL)
+		}
+	})
+
+	t.Run("reject invalid storage type and zero cleanup interval", func(t *testing.T) {
+		t.Setenv("MAIL_DOMAIN", "example.com")
+		t.Setenv("STORAGE_TYPE", "redis")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("expected error for invalid STORAGE_TYPE")
+		}
+
+		t.Setenv("STORAGE_TYPE", "sqlite")
+		t.Setenv("CLEANUP_INTERVAL", "0")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("expected error for CLEANUP_INTERVAL=0")
 		}
 	})
 }

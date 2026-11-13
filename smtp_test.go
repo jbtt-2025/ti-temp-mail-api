@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -17,24 +18,36 @@ func TestNewSMTPServer_MaxMessageBytes(t *testing.T) {
 		MaxEmailMemory: 1024 * 1024,
 		MaxMailboxes:   100,
 	}
-	ms := NewMailboxStore(cfg.MaxMailboxes)
-	es := NewEmailStore(cfg.MaxEmails, cfg.MaxEmailMemory)
-	s := NewSMTPServer(cfg, ms, es)
+	store := NewMemoryStore(cfg.MaxMailboxes, cfg.MaxEmails, cfg.MaxEmailMemory)
+	s := NewSMTPServer(cfg, store)
 
 	if s.MaxMessageBytes != 20*1024*1024 {
 		t.Fatalf("MaxMessageBytes = %d, want %d", s.MaxMessageBytes, 20*1024*1024)
 	}
 }
 
-func TestSMTPSession_DataLimits(t *testing.T) {
+func TestSMTPSession_RcptAndDataLimits(t *testing.T) {
 	cfg := &Config{MailDomains: []string{"example.com"}}
-	ms := NewMailboxStore(10)
-	ms.Set("tok", "u@example.com")
+	ctx := context.Background()
+
+	t.Run("rcpt validates allocated mailbox", func(t *testing.T) {
+		store := NewMemoryStore(10, 10, 64*1024*1024)
+		_, _ = store.CreateMailbox(ctx, "tok", "u@example.com")
+		sess := &smtpSession{backend: &smtpBackend{cfg: cfg, store: store}}
+
+		if err := sess.Rcpt("missing@example.com", nil); err == nil {
+			t.Fatal("expected 550 error for unallocated mailbox")
+		}
+		if err := sess.Rcpt("u@example.com", nil); err != nil {
+			t.Fatalf("expected allocated mailbox to be accepted, got %v", err)
+		}
+	})
 
 	t.Run("rejects message over 20MB", func(t *testing.T) {
-		es := NewEmailStore(10, 64*1024*1024)
+		store := NewMemoryStore(10, 10, 64*1024*1024)
+		_, _ = store.CreateMailbox(ctx, "tok", "u@example.com")
 		sess := &smtpSession{
-			backend: &smtpBackend{cfg: cfg, ms: ms, es: es},
+			backend: &smtpBackend{cfg: cfg, store: store},
 			rcptTo:  "u@example.com",
 		}
 
@@ -43,15 +56,16 @@ func TestSMTPSession_DataLimits(t *testing.T) {
 		if !errors.Is(err, gosmtp.ErrDataTooLarge) {
 			t.Fatalf("expected ErrDataTooLarge, got %v", err)
 		}
-		if es.Len() != 0 {
-			t.Fatalf("expected no email stored, got %d", es.Len())
+		if store.es.Len() != 0 {
+			t.Fatalf("expected no email stored, got %d", store.es.Len())
 		}
 	})
 
 	t.Run("rejects parsed email larger than MAX_EMAIL_MEMORY", func(t *testing.T) {
-		es := NewEmailStore(10, 1024) // 1KB store cap
+		store := NewMemoryStore(10, 10, 1024) // 1KB store cap
+		_, _ = store.CreateMailbox(ctx, "tok", "u@example.com")
 		sess := &smtpSession{
-			backend: &smtpBackend{cfg: cfg, ms: ms, es: es},
+			backend: &smtpBackend{cfg: cfg, store: store},
 			rcptTo:  "u@example.com",
 		}
 
@@ -61,15 +75,16 @@ func TestSMTPSession_DataLimits(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error when parsed email exceeds MAX_EMAIL_MEMORY")
 		}
-		if es.Len() != 0 {
-			t.Fatalf("expected no email stored, got %d", es.Len())
+		if store.es.Len() != 0 {
+			t.Fatalf("expected no email stored, got %d", store.es.Len())
 		}
 	})
 
 	t.Run("stores valid MIME email without retaining BodyText", func(t *testing.T) {
-		es := NewEmailStore(10, 1024*1024)
+		store := NewMemoryStore(10, 10, 1024*1024)
+		_, _ = store.CreateMailbox(ctx, "tok", "u@example.com")
 		sess := &smtpSession{
-			backend: &smtpBackend{cfg: cfg, ms: ms, es: es},
+			backend: &smtpBackend{cfg: cfg, store: store},
 			rcptTo:  "u@example.com",
 		}
 
@@ -77,7 +92,10 @@ func TestSMTPSession_DataLimits(t *testing.T) {
 		if err := sess.Data(strings.NewReader(raw)); err != nil {
 			t.Fatalf("Data failed: %v", err)
 		}
-		msgs := es.ListByMailbox("u@example.com")
+		msgs, err := store.ListEmailsByMailbox(ctx, "u@example.com")
+		if err != nil {
+			t.Fatalf("ListEmailsByMailbox failed: %v", err)
+		}
 		if len(msgs) != 1 || msgs[0].BodyHTML == "" || msgs[0].Subject != "hi" {
 			t.Fatalf("unexpected stored email: %+v", msgs)
 		}

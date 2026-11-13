@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -15,9 +16,8 @@ import (
 const maxMessageBytes int64 = 20 * 1024 * 1024 // 20MB
 
 type smtpBackend struct {
-	cfg *Config
-	ms  *MailboxStore
-	es  *EmailStore
+	cfg   *Config
+	store Store
 }
 
 type smtpSession struct {
@@ -43,7 +43,12 @@ func (s *smtpSession) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "Invalid recipient"}
 	}
 
-	if !s.backend.ms.Exists(to) {
+	exists, err := s.backend.store.MailboxExists(context.Background(), to)
+	if err != nil {
+		log.Printf("SMTP: MailboxExists error for %s: %v", to, err)
+		return &gosmtp.SMTPError{Code: 451, EnhancedCode: gosmtp.EnhancedCode{4, 3, 0}, Message: "Temporary storage error"}
+	}
+	if !exists {
 		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "Mailbox does not exist"}
 	}
 
@@ -75,7 +80,16 @@ func (s *smtpSession) Data(r io.Reader) error {
 		BodyHTML:         parsed.BodyHTML,
 		AttachmentsCount: parsed.AttachmentsCount,
 	}
-	if !s.backend.es.Add(email) {
+	saved, err := s.backend.store.SaveEmail(context.Background(), email)
+	if err != nil {
+		log.Printf("SMTP: SaveEmail error for %s: %v", s.rcptTo, err)
+		return &gosmtp.SMTPError{
+			Code:         451,
+			EnhancedCode: gosmtp.EnhancedCode{4, 3, 0},
+			Message:      "Temporary storage error",
+		}
+	}
+	if !saved {
 		log.Printf("SMTP: message for %s exceeds email memory limit (%d bytes)", s.rcptTo, emailMemoryBytes(email))
 		return &gosmtp.SMTPError{
 			Code:         552,
@@ -102,8 +116,8 @@ func newUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:])
 }
 
-func NewSMTPServer(cfg *Config, ms *MailboxStore, es *EmailStore) *gosmtp.Server {
-	be := &smtpBackend{cfg: cfg, ms: ms, es: es}
+func NewSMTPServer(cfg *Config, store Store) *gosmtp.Server {
+	be := &smtpBackend{cfg: cfg, store: store}
 	s := gosmtp.NewServer(be)
 	s.Addr = fmt.Sprintf(":%d", cfg.SMTPPort)
 	s.Domain = "localhost"

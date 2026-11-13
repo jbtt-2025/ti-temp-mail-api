@@ -2,10 +2,86 @@ package main
 
 import (
 	"container/heap"
+	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 )
+
+// Store abstracts mailbox allocation, email persistence, and expired record reclamation.
+type Store interface {
+	CreateMailbox(ctx context.Context, token, mailbox string) (bool, error)
+	MailboxExists(ctx context.Context, mailbox string) (bool, error)
+	GetMailboxByToken(ctx context.Context, token string) (string, bool, error)
+	SaveEmail(ctx context.Context, email *Email) (bool, error)
+	ListEmailsByMailbox(ctx context.Context, mailbox string) ([]*Email, error)
+	GetEmailByID(ctx context.Context, id string) (*Email, bool, error)
+	CleanupExpired(ctx context.Context, now time.Time) (deletedEmails int64, deletedMailboxes int64, err error)
+	Close() error
+}
+
+// NewStore builds the configured storage backend.
+func NewStore(cfg *Config) (Store, error) {
+	switch cfg.StorageType {
+	case "", "memory":
+		return NewMemoryStore(cfg.MaxMailboxes, cfg.MaxEmails, cfg.MaxEmailMemory), nil
+	case "sqlite", "mysql", "postgres":
+		return NewGormStore(cfg)
+	case "d1":
+		return NewD1Store(cfg)
+	default:
+		return nil, fmt.Errorf("unsupported storage type: %s", cfg.StorageType)
+	}
+}
+
+// MemoryStore wraps MailboxStore and EmailStore for in-memory operation.
+type MemoryStore struct {
+	ms *MailboxStore
+	es *EmailStore
+}
+
+func NewMemoryStore(maxMailboxes, maxEmails int, maxEmailBytes int64) *MemoryStore {
+	return &MemoryStore{
+		ms: NewMailboxStore(maxMailboxes),
+		es: NewEmailStore(maxEmails, maxEmailBytes),
+	}
+}
+
+func (m *MemoryStore) CreateMailbox(_ context.Context, token, mailbox string) (bool, error) {
+	return m.ms.CreateIfAbsent(token, mailbox), nil
+}
+
+func (m *MemoryStore) MailboxExists(_ context.Context, mailbox string) (bool, error) {
+	return m.ms.Exists(mailbox), nil
+}
+
+func (m *MemoryStore) GetMailboxByToken(_ context.Context, token string) (string, bool, error) {
+	mailbox, ok := m.ms.GetByToken(token)
+	return mailbox, ok, nil
+}
+
+func (m *MemoryStore) SaveEmail(_ context.Context, email *Email) (bool, error) {
+	return m.es.Add(email), nil
+}
+
+func (m *MemoryStore) ListEmailsByMailbox(_ context.Context, mailbox string) ([]*Email, error) {
+	return m.es.ListByMailbox(mailbox), nil
+}
+
+func (m *MemoryStore) GetEmailByID(_ context.Context, id string) (*Email, bool, error) {
+	email, ok := m.es.GetByID(id)
+	return email, ok, nil
+}
+
+func (m *MemoryStore) CleanupExpired(_ context.Context, _ time.Time) (int64, int64, error) {
+	return 0, 0, nil
+}
+
+func (m *MemoryStore) Close() error {
+	return nil
+}
 
 type MailboxStore struct {
 	mu      sync.RWMutex
@@ -37,6 +113,20 @@ func (s *MailboxStore) Set(token, mailbox string) {
 	}
 	s.byToken.Add(token, mailbox)
 	s.byAddr[mailbox] = token
+}
+
+func (s *MailboxStore) CreateIfAbsent(token, mailbox string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.byAddr[mailbox]; exists {
+		return false
+	}
+	if oldMailbox, ok := s.byToken.Peek(token); ok && oldMailbox != mailbox {
+		delete(s.byAddr, oldMailbox)
+	}
+	s.byToken.Add(token, mailbox)
+	s.byAddr[mailbox] = token
+	return true
 }
 
 func (s *MailboxStore) GetByToken(token string) (string, bool) {

@@ -1,0 +1,11 @@
+name = "ti-temp-mail-d1-worker"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ti-temp-mail"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Set API_TOKEN as a secret instead of committing it here:
+#   npx wrangler secret put API_TOKEN
