@@ -137,3 +137,39 @@ func TestGormStore_SQLiteLifecycleAndIndependentExpiration(t *testing.T) {
 		t.Fatalf("expected msg-2 to remain visible when EmailTTL=0, ok=%v err=%v", ok, err)
 	}
 }
+
+func TestGormStore_ExpiredMailboxCanBeReallocatedWhileActiveRejected(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	cfg := &Config{
+		StorageType:     "sqlite",
+		DBDSN:           filepath.Join(t.TempDir(), "recreate.db"),
+		MailboxTTL:      10 * time.Second,
+		EmailTTL:        30 * time.Second,
+		CleanupInterval: time.Minute,
+	}
+
+	rawStore, err := NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	defer rawStore.Close()
+
+	gs := rawStore.(*GormStore)
+	gs.nowFn = func() time.Time { return now }
+	ctx := context.Background()
+
+	if created, err := gs.CreateMailbox(ctx, "tok-1", "reuse@example.com"); err != nil || !created {
+		t.Fatalf("initial CreateMailbox failed: created=%v err=%v", created, err)
+	}
+	if dup, err := gs.CreateMailbox(ctx, "tok-2", "reuse@example.com"); err != nil || dup {
+		t.Fatalf("active duplicate CreateMailbox should be rejected: dup=%v err=%v", dup, err)
+	}
+
+	now = now.Add(15 * time.Second)
+	if created, err := gs.CreateMailbox(ctx, "tok-3", "reuse@example.com"); err != nil || !created {
+		t.Fatalf("expired mailbox re-creation should succeed before cleanup: created=%v err=%v", created, err)
+	}
+	if dup, err := gs.CreateMailbox(ctx, "tok-4", "reuse@example.com"); err != nil || dup {
+		t.Fatalf("re-activated mailbox should reject duplicate: dup=%v err=%v", dup, err)
+	}
+}

@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ti-TempMail 临时邮箱工作台</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- 顶部极简导航栏 -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand">
+          <span style="font-size: 18px;">⚡</span>
+          <span class="brand-title">Ti-TempMail 邮箱工作台</span>
+        </div>
+        <button id="btnUpstreamChip" class="upstream-chip" title="点击修改上游 URL、TOKEN 与域名策略">
+          <span>🌐</span>
+          <span id="headerUpstreamText" class="url mono">https://anymail.77669876.xyz</span>
+          <span id="headerDomainBadge" class="pill-count">自动轮换</span>
+        </button>
+      </div>
+
+      <div class="topbar-right">
+        <div class="stats-bar">
+          <span>总邮箱: <b id="statTotalAccounts" class="mono">0</b></span>
+          <span>·</span>
+          <span>总邮件: <b id="statTotalEmails" class="mono">0</b></span>
+          <span>·</span>
+          <span>失效: <b id="statExpiredAccounts" class="mono" style="color: var(--text-rose);">0</b></span>
+        </div>
+
+        <button id="btnTopCreate" class="btn btn-primary btn-sm">+ 申请邮箱</button>
+        <button id="btnTopImport" class="btn btn-sm">📥 导入</button>
+        <button id="btnTopExport" class="btn btn-sm">💾 导出 JSONL</button>
+
+        <div class="divider-v"></div>
+
+        <button id="btnToggleDark" class="btn-icon" title="切换暗黑 / 亮色模式">🌙</button>
+      </div>
+    </header>
+
+    <!-- 三栏主工作台 (Shadcn Mail Layout) -->
+    <main class="workbench">
+      <!-- 栏 1: 左侧账号切换与导航栏 -->
+      <aside class="sidebar">
+        <!-- 账号下拉切换器 -->
+        <div class="switcher-box">
+          <div class="switcher-meta">
+            <span class="section-label">当前工作空间</span>
+            <span id="sidebarAccCount" class="pill-count mono">0 个邮箱</span>
+          </div>
+
+          <button id="btnSwitcherTrigger" class="switcher-trigger" type="button">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+              <span id="switcherCurrentDot" class="dot dot-all"></span>
+              <div style="min-width:0;">
+                <div id="switcherCurrentTitle" style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                  聚合收件箱 (全部邮箱)
+                </div>
+                <div id="switcherCurrentSub" style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                  0 封未读
+                </div>
+              </div>
+            </div>
+            <span style="font-size:11px;color:var(--text-muted);">▾</span>
+          </button>
+
+          <div id="switcherDropdown" class="switcher-dropdown hidden">
+            <div style="padding:8px;border-bottom:1px solid var(--border-color);">
+              <input id="switcherSearchInput" class="input" type="text" placeholder="搜索邮箱、上游或标签..." />
+            </div>
+            <div id="switcherList" class="switcher-list"></div>
+          </div>
+        </div>
+
+        <!-- 文件夹导航 -->
+        <nav class="nav-section">
+          <button class="nav-btn active" data-folder="inbox" type="button">
+            <span>📥 收件箱</span>
+            <span id="navUnreadCount" class="badge badge-blue hidden">0</span>
+          </button>
+          <button class="nav-btn radar" data-folder="code_radar" type="button">
+            <span>⚡ 验证码雷达</span>
+            <span id="navCodeCount" class="badge badge-blue hidden">0</span>
+          </button>
+          <button class="nav-btn" data-folder="accounts" type="button">
+            <span>👥 邮箱账号管理</span>
+            <span id="navAccTotal" class="pill-count mono">0</span>
+          </button>
+        </nav>
+
+        <!-- 状态统计卡片 -->
+        <div class="sidebar-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span class="section-label">邮箱状态</span>
+            <span id="runningJobsLabel" style="font-size:10px;color:var(--text-blue);" class="hidden">0 运行中</span>
+          </div>
+          <div class="stat-grid-2">
+            <div class="stat-tile ok">
+              <div style="font-size:11px;">有效 / 正常</div>
+              <div id="tileActiveCount" class="num mono">0</div>
+            </div>
+            <div class="stat-tile err">
+              <div style="font-size:11px;">Token 失效</div>
+              <div id="tileExpiredCount" class="num mono">0</div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);">
+            <span>待命/空箱: <b id="tileEmptyCount" class="mono">0</b></span>
+            <span>本地存储: <b id="tileStorageKind">IndexedDB</b></span>
+          </div>
+        </div>
+
+        <!-- 自动轮询设置卡片 -->
+        <div class="sidebar-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:12px;font-weight:500;">自动定时刷新</span>
+            <button id="btnTogglePolling" class="switch" type="button" aria-label="自动定时刷新">
+              <span class="switch-knob"></span>
+            </button>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-muted);">
+            <span>并发拉取数 (<b id="concurrencyVal" class="mono">3</b>)</span>
+            <input id="rangeConcurrency" type="range" min="1" max="10" value="3" style="width:90px;" />
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-muted);">
+            <span>刷新间隔</span>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <input id="inputPollInterval" class="input mono" type="number" min="5" max="3600" step="5" value="30" style="width:66px;padding:3px 6px;text-align:right;" />
+              <span>秒</span>
+            </div>
+          </div>
+
+          <div class="preset-row">
+            <button class="preset-btn" data-preset="15" type="button">15s</button>
+            <button class="preset-btn active" data-preset="30" type="button">30s</button>
+            <button class="preset-btn" data-preset="60" type="button">60s</button>
+            <button class="preset-btn" data-preset="180" type="button">180s</button>
+          </div>
+        </div>
+
+        <!-- 底部操作栏 -->
+        <div class="sidebar-footer">
+          <button id="btnSidebarCreate" class="btn btn-primary" type="button">+ 批量申请邮箱</button>
+          <button id="btnSyncAll" class="btn" type="button">⚡ 一键同步所有</button>
+          <div class="grid-2">
+            <button id="btnSidebarImport" class="btn btn-sm" type="button">📥 批量导入</button>
+            <button id="btnSidebarExport" class="btn btn-sm" type="button">💾 导出 JSONL</button>
+          </div>
+          <div class="grid-2">
+            <button id="btnReapplyAllExpired" class="btn btn-sm btn-warn" type="button">🔄 重申失效</button>
+            <button id="btnPurgeExpired" class="btn btn-sm btn-danger" type="button">🧹 清理失效</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 栏 2 & 3: 邮件视图 OR 账号管理全宽视图 -->
+      <section id="viewMailColumns" style="flex:1;display:flex;min-width:0;overflow:hidden;">
+        <!-- 栏 2: 邮件列表 -->
+        <section class="mail-list-col">
+          <div class="list-header">
+            <div style="display:flex;align-items:center;gap:6px;">
+              <div class="search-wrap">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                </svg>
+                <input id="mailSearchInput" class="input" type="text" placeholder="搜索发件人、主题、验证码、邮箱..." />
+              </div>
+              <button id="btnRefreshCurrent" class="btn btn-sm" title="刷新当前选中或全部邮箱邮件" type="button">↻</button>
+            </div>
+
+            <div class="subtabs">
+              <button class="subtab active" data-subfilter="all" type="button">全部 (<span id="subCountAll">0</span>)</button>
+              <button class="subtab" data-subfilter="unread" type="button">未读 (<span id="subCountUnread">0</span>)</button>
+              <button class="subtab" data-subfilter="code" type="button">⚡ 验证码 (<span id="subCountCode">0</span>)</button>
+            </div>
+          </div>
+
+          <div id="mailListContainer" class="mail-cards"></div>
+        </section>
+
+        <!-- 栏 3: 邮件详情阅读区 -->
+        <section id="mailDisplayContainer" class="mail-display-col"></section>
+      </section>
+
+      <!-- 账号管理全宽视图 -->
+      <section id="viewAccountsFull" class="accounts-full-col hidden">
+        <div class="manager-toolbar">
+          <div>
+            <h2 style="margin:0;font-size:15px;font-weight:700;">👥 邮箱账号管理</h2>
+            <p id="managerSubtitle" style="margin:3px 0 0;font-size:11px;color:var(--text-muted);">
+              共 0 个邮箱 · 所有邮箱、MAIL_TOKEN 及邮件均持久化于浏览器本地
+            </p>
+          </div>
+
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;">
+            <button id="btnCopyFilteredMails" class="btn btn-sm" type="button">📋 复制邮箱 (0)</button>
+            <button id="btnSyncSelected" class="btn btn-sm" type="button">⚡ 同步选中</button>
+            <button id="btnReapplySelected" class="btn btn-sm btn-warn" type="button">🔄 重申 Token</button>
+            <input id="accSearchInput" class="input" type="text" placeholder="搜索邮箱、上游、标签..." style="width:170px;" />
+            <select id="accSortSelect" class="select" style="width:auto;">
+              <option value="created_desc">按创建时间 (最新)</option>
+              <option value="created_asc">按创建时间 (最早)</option>
+              <option value="last_checked_desc">按最后同步</option>
+              <option value="mail_asc">按邮箱 (A-Z)</option>
+              <option value="unread_desc">按未读数</option>
+            </select>
+            <select id="accStatusFilter" class="select" style="width:auto;">
+              <option value="all">全部状态</option>
+              <option value="active">正常活跃</option>
+              <option value="empty">空箱 / 已连接</option>
+              <option value="expired">Token 失效</option>
+              <option value="idle">待命</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:32px;"><input id="chkAllAccounts" type="checkbox" /></th>
+                <th>状态</th>
+                <th>邮箱账号</th>
+                <th>上游服务 / CREATE_TOKEN</th>
+                <th>模式</th>
+                <th>最新验证码</th>
+                <th>创建时间</th>
+                <th>最后同步</th>
+                <th>标签</th>
+                <th style="text-align:right;">操作 (Actions)</th>
+              </tr>
+            </thead>
+            <tbody id="accTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 弹窗 1: 上游配置与批量申请邮箱 -->
+  <div id="createModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <div>
+          <h3>⚡ 上游服务配置 & 批量申请邮箱</h3>
+          <p>填写上游 API 地址、可选鉴权 TOKEN 及多个域名，支持按轮换/随机/指定模式批量获取邮箱</p>
+        </div>
+        <button class="btn-icon" data-close-modal="createModal" type="button">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-field full">
+            <label class="form-label">
+              <span>上游服务 URL <span class="form-hint">(ti-temp-mail-api 地址)</span></span>
+              <button id="btnProbeUpstream" class="btn btn-xs" type="button">🔍 探测域名 (/info)</button>
+            </label>
+            <input id="inputUpstreamUrl" class="input mono" type="url" placeholder="https://anymail.77669876.xyz" />
+            <div id="probeResultHint" class="form-hint">默认地址：https://anymail.77669876.xyz</div>
+          </div>
+
+          <div class="form-field full">
+            <label class="form-label">
+              <span>创建鉴权 TOKEN <span class="form-hint">(即服务端 CREATE_TOKEN，可为空)</span></span>
+              <button id="btnToggleTokenVis" class="btn btn-xs" type="button">显示</button>
+            </label>
+            <input id="inputCreateToken" class="input mono" type="password" placeholder="若服务端未设置 CREATE_TOKEN 请留空" />
+          </div>
+
+          <div class="form-field full">
+            <label class="form-label">
+              <span>域名列表 <span class="form-hint">(可自己填写多个，逗号 / 换行 / 空格分隔)</span></span>
+              <button id="btnClearDomains" class="btn btn-xs" type="button">清空</button>
+            </label>
+            <textarea id="inputDomainsRaw" class="textarea mono" rows="2" placeholder="例如：77669876.xyz, mail.example.com&#10;留空则由服务端随机分配"></textarea>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label">域名申请策略</label>
+            <select id="selectDomainStrategy" class="select"></select>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label">邮箱生成模式</label>
+            <select id="selectMailMode" class="select">
+              <option value="maindomain">主域名模式 (random@domain)</option>
+              <option value="subdomain">子域名模式 (random@sub.domain)</option>
+              <option value="alternate">主域名 / 子域名轮换申请</option>
+            </select>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label">
+              <span>申请数量</span>
+              <span style="display:flex;gap:4px;">
+                <button class="btn btn-xs quick-count" data-count="1" type="button">1</button>
+                <button class="btn btn-xs quick-count" data-count="5" type="button">5</button>
+                <button class="btn btn-xs quick-count" data-count="10" type="button">10</button>
+                <button class="btn btn-xs quick-count" data-count="20" type="button">20</button>
+              </span>
+            </label>
+            <input id="inputBatchCount" class="input mono" type="number" min="1" max="100" value="1" />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label">分组标签 <span class="form-hint">(可选，逗号分隔)</span></label>
+            <input id="inputBatchTags" class="input" type="text" placeholder="例如：batch-01, openai" />
+          </div>
+        </div>
+
+        <div id="createProgressBox" class="log-box mono hidden"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnSaveUpstreamOnly" class="btn" type="button">仅保存配置</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" data-close-modal="createModal" type="button">关闭</button>
+          <button id="btnExecuteCreate" class="btn btn-primary" type="button">⚡ 开始申请邮箱</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 2: 批量导入 JSONL -->
+  <div id="importModal" class="modal-backdrop hidden">
+    <div class="modal-panel" style="max-width:720px;">
+      <div class="modal-header">
+        <div>
+          <h3>📥 批量导入邮箱凭证 (.jsonl)</h3>
+          <p>支持导入由本工具导出的 JSONL 文件（含 upstream + token + mail + mail_token），也可粘贴文本导入</p>
+        </div>
+        <button class="btn-icon" data-close-modal="importModal" type="button">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div id="importDropzone" class="dropzone">
+          <div style="font-weight:600;margin-bottom:4px;">点击选择文件 或 拖拽 .jsonl / .json / .txt 文件到此处</div>
+          <div class="form-hint">每行格式：{"upstream":"...","token":"...","mail":"...","mail_token":"..."}</div>
+          <input id="inputImportFile" type="file" accept=".jsonl,.json,.txt" class="hidden" />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label">
+            <span>JSONL 凭证内容：</span>
+            <span id="importParseStat" class="form-hint mono">已解析 0 个邮箱</span>
+          </label>
+          <textarea id="inputImportText" class="textarea mono" rows="6" placeholder='{"upstream":"https://anymail.77669876.xyz","token":"","mail":"abcdefghij@example.com","mail_token":"550e8400-..."}'></textarea>
+        </div>
+
+        <div class="form-grid" style="padding:10px;background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border-color);">
+          <div class="form-field">
+            <label class="form-label">缺省上游地址 <span class="form-hint">(当某行未含 upstream)</span></label>
+            <input id="inputImportDefaultUpstream" class="input mono" type="url" />
+          </div>
+          <div class="form-field">
+            <label class="form-label">缺省 TOKEN <span class="form-hint">(当某行未含 token)</span></label>
+            <input id="inputImportDefaultToken" class="input mono" type="text" placeholder="可为空" />
+          </div>
+          <div class="form-field">
+            <label class="form-label">重复邮箱处理策略</label>
+            <select id="selectImportDedup" class="select">
+              <option value="overwrite">覆盖更新凭证（保留已有邮件缓存）</option>
+              <option value="skip">跳过已存在邮箱</option>
+              <option value="merge_tags">更新凭证并合并标签</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">附加分组标签 <span class="form-hint">(可选)</span></label>
+            <input id="inputImportTags" class="input" type="text" placeholder="例如：imported, 2026" />
+          </div>
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+          <input id="chkImportAutoSync" type="checkbox" checked />
+          <span>导入后自动校验凭证并同步收件箱</span>
+        </label>
+
+        <div id="importErrorsBox" class="log-box mono hidden" style="color:var(--text-rose);"></div>
+
+        <div id="importPreviewWrap" class="hidden">
+          <div class="form-hint" style="margin-bottom:4px;">解析预览（前 10 条）：</div>
+          <div class="preview-box">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>邮箱 (MAIL)</th>
+                  <th>上游 (UPSTREAM)</th>
+                  <th>TOKEN</th>
+                  <th>MAIL_TOKEN</th>
+                </tr>
+              </thead>
+              <tbody id="importPreviewBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span id="importFooterHint" class="form-hint">请上传或粘贴凭证数据</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" data-close-modal="importModal" type="button">取消</button>
+          <button id="btnConfirmImport" class="btn btn-primary" type="button" disabled>确认导入 (0)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 3: 导出 JSONL -->
+  <div id="exportModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <div>
+          <h3>💾 导出邮箱与完整凭证 (.jsonl)</h3>
+          <p>导出上游地址 (upstream) + 创建 TOKEN (token) + 邮箱 (mail) + 邮箱凭证 (mail_token)</p>
+        </div>
+        <button class="btn-icon" data-close-modal="exportModal" type="button">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-field">
+            <label class="form-label">导出范围</label>
+            <select id="selectExportScope" class="select">
+              <option value="all">全部邮箱</option>
+              <option value="active">仅正常活跃邮箱</option>
+              <option value="empty">仅空箱 / 待同步邮箱</option>
+              <option value="expired">仅 Token 失效邮箱</option>
+              <option value="selected">仅列表当前勾选项</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">导出格式</label>
+            <select id="selectExportFormat" class="select">
+              <option value="jsonl">JSON Lines (.jsonl) - 推荐</option>
+              <option value="json">JSON 数组 (.json)</option>
+              <option value="delim">四段式文本 (upstream----token----mail----mail_token)</option>
+              <option value="mail_only">仅邮箱地址 (.txt)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label">
+            <span id="exportPreviewCount">数据预览（0 行）：</span>
+            <span id="exportFormatLabel" class="form-hint mono">JSONL</span>
+          </label>
+          <textarea id="textareaExportPreview" class="textarea mono" rows="9" readonly></textarea>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span id="exportFooterCount" class="form-hint">共 0 个凭据</span>
+        <div style="display:flex;gap:8px;">
+          <button id="btnCopyExport" class="btn" type="button">📋 复制内容</button>
+          <button id="btnDownloadExport" class="btn btn-primary" type="button">⬇ 下载文件</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 4: 编辑单个邮箱凭据 / 标签 -->
+  <div id="editAccountModal" class="modal-backdrop hidden">
+    <div class="modal-panel" style="max-width:480px;">
+      <div class="modal-header">
+        <div>
+          <h3>✏️ 编辑邮箱信息与凭据</h3>
+          <p id="editAccMailTitle" class="mono"></p>
+        </div>
+        <button class="btn-icon" data-close-modal="editAccountModal" type="button">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-field">
+          <label class="form-label">上游服务 URL (upstream)</label>
+          <input id="editAccUpstream" class="input mono" type="url" />
+        </div>
+        <div class="form-field">
+          <label class="form-label">创建 TOKEN (CREATE_TOKEN，重申 Token 时使用)</label>
+          <input id="editAccToken" class="input mono" type="text" placeholder="可为空" />
+        </div>
+        <div class="form-field">
+          <label class="form-label">邮箱凭证 (MAIL_TOKEN)</label>
+          <input id="editAccMailToken" class="input mono" type="text" />
+        </div>
+        <div class="form-field">
+          <label class="form-label">分组标签 <span class="form-hint">(逗号分隔)</span></label>
+          <input id="editAccTags" class="input" type="text" />
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnReapplyFromEdit" class="btn btn-warn" type="button">🔄 立即重申此邮箱 Token</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" data-close-modal="editAccountModal" type="button">取消</button>
+          <button id="btnSaveAccountEdit" class="btn btn-primary" type="button">保存修改</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 通知容器 -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="core.js"></script>
+  <script src="storage.js"></script>
+  <script src="api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

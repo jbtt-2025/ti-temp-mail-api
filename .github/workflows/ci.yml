@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  test-go:
+    name: Go Vet, Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go Vet
+        env:
+          CGO_ENABLED: '0'
+        run: go vet ./...
+
+      - name: Run Go Tests
+        env:
+          CGO_ENABLED: '0'
+        run: go test -v -count=1 ./...
+
+      - name: Verify Binary Build
+        env:
+          CGO_ENABLED: '0'
+        run: go build -trimpath -o /tmp/ti-temp-mail-api .
+
+  test-frontend:
+    name: Static Frontend Check & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Syntax Check Static JS
+        run: |
+          node --check frontend/core.js
+          node --check frontend/storage.js
+          node --check frontend/api.js
+          node --check frontend/app.js
+
+      - name: Run Frontend Unit Tests
+        run: node --test frontend/core.test.js

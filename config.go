@@ -20,6 +20,7 @@ const (
 
 type Config struct {
 	MailDomains     []string      // MAIL_DOMAIN, comma-separated, required
+	MXDomain        string        // MX_DOMAIN, optional, defaults to MailDomains[0]
 	SMTPPort        int           // SMTP_PORT, default 25
 	HTTPPort        int           // HTTP_PORT, default 8080
 	MaxEmails       int           // MAX_EMAILS, default 10000 (memory mode)
@@ -52,8 +53,14 @@ func LoadConfig() (*Config, error) {
 		return nil, errors.New("MAIL_DOMAIN environment variable is required")
 	}
 
+	mxDomain := strings.TrimSuffix(strings.TrimSpace(os.Getenv("MX_DOMAIN")), ".")
+	if mxDomain == "" {
+		mxDomain = domains[0]
+	}
+
 	cfg := &Config{
 		MailDomains:     domains,
+		MXDomain:        mxDomain,
 		SMTPPort:        25,
 		HTTPPort:        8080,
 		MaxEmails:       10000,

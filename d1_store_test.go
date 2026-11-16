@@ -38,15 +38,21 @@ func TestD1Store_WorkerAPIProtocol(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/mailboxes":
 			var body struct {
-				Token     string `json:"token"`
-				Mailbox   string `json:"mailbox"`
-				CreatedAt int64  `json:"createdAt"`
+				Token         string `json:"token"`
+				Mailbox       string `json:"mailbox"`
+				CreatedAt     int64  `json:"createdAt"`
+				ExpiredBefore *int64 `json:"expiredBefore"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if _, exists := mailboxes[body.Mailbox]; exists {
-				w.WriteHeader(http.StatusConflict)
-				_, _ = w.Write([]byte(`{"created":false}`))
-				return
+			if existing, exists := mailboxes[body.Mailbox]; exists {
+				if body.ExpiredBefore != nil && existing.createdAt <= *body.ExpiredBefore {
+					delete(tokens, existing.token)
+					delete(mailboxes, body.Mailbox)
+				} else {
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"created":false}`))
+					return
+				}
 			}
 			mailboxes[body.Mailbox] = struct {
 				token     string
@@ -234,9 +240,15 @@ func TestD1Store_WorkerAPIProtocol(t *testing.T) {
 	if _, ok, err := d1.GetEmailByID(ctx, "e1"); err != nil || !ok {
 		t.Fatalf("expected email still active at +15s, ok=%v err=%v", ok, err)
 	}
+	if recreated, err := d1.CreateMailbox(ctx, "tok-1b", "u1@example.com"); err != nil || !recreated {
+		t.Fatalf("expected expired mailbox re-creation to succeed, recreated=%v err=%v", recreated, err)
+	}
+	if dupActive, err := d1.CreateMailbox(ctx, "tok-1c", "u1@example.com"); err != nil || dupActive {
+		t.Fatalf("expected active re-created mailbox to reject duplicate, dupActive=%v err=%v", dupActive, err)
+	}
 
-	// Advance time to +25s: both expired, trigger Go-driven cleanup.
-	now = now.Add(10 * time.Second)
+	// Advance time past both (+11s -> +26s): both expired, trigger Go-driven cleanup.
+	now = now.Add(11 * time.Second)
 	delE, delM, err := d1.CleanupExpired(ctx, now)
 	if err != nil || delE != 1 || delM != 1 {
 		t.Fatalf("CleanupExpired=(%d,%d,%v), want (1,1,nil)", delE, delM, err)

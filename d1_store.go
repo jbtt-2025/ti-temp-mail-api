@@ -78,10 +78,14 @@ func (s *D1Store) doJSON(ctx context.Context, method, path string, reqBody, resp
 }
 
 func (s *D1Store) CreateMailbox(ctx context.Context, token, mailbox string) (bool, error) {
+	now := s.nowFn()
 	payload := map[string]any{
 		"token":     token,
 		"mailbox":   mailbox,
-		"createdAt": s.nowFn().Unix(),
+		"createdAt": now.Unix(),
+	}
+	if cutoff, ok := cutoffUnix(now, s.mailboxTTL); ok {
+		payload["expiredBefore"] = cutoff
 	}
 	status, err := s.doJSON(ctx, http.MethodPost, "/mailboxes", payload, nil)
 	if err != nil {

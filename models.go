@@ -59,3 +59,9 @@ type MessageDetail struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
+
+// ServerInfoResponse is returned by GET /info for frontend configuration discovery.
+type ServerInfoResponse struct {
+	Domains             []string `json:"domains"`
+	RequiresCreateToken bool     `json:"requiresCreateToken"`
+}

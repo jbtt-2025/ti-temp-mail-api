@@ -66,8 +66,16 @@ export default {
           return jsonResponse({ error: "token and mailbox are required" }, 400);
         }
         const createdAt = Number.isFinite(body.createdAt) ? Math.trunc(body.createdAt) : nowSeconds();
+        const expiredBefore = parseOptionalInt(body.expiredBefore);
 
         try {
+          if (expiredBefore !== null) {
+            await env.DB.prepare(
+              "DELETE FROM mailboxes WHERE mailbox = ? AND created_at <= ?"
+            )
+              .bind(mailbox, expiredBefore)
+              .run();
+          }
           await env.DB.prepare(
             "INSERT INTO mailboxes (mailbox, token, created_at) VALUES (?, ?, ?)"
           )

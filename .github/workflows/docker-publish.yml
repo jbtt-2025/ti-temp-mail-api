@@ -1,4 +1,4 @@
-name: Publish Docker image (Multi Registries)
+name: Release & Docker
 
 on:
   push:
@@ -6,28 +6,147 @@ on:
       - '*'
   workflow_dispatch:
     inputs:
-      name:
-        description: 'reason'
+      tag_name:
+        description: 'Optional custom release tag (e.g. v1.0.1). Leave empty to auto-generate v1.0.<run_number>'
         required: false
+        default: ''
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE: jbtt-2025/ti-temp-mail-api
+permissions:
+  contents: write
+  packages: write
 
 jobs:
-  push_to_registries:
-    name: Push Docker image to multiple registries
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
+    outputs:
+      app_version: ${{ steps.meta.outputs.app_version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      image_name: ${{ steps.meta.outputs.image_name }}
+      docker_tags: ${{ steps.meta.outputs.docker_tags }}
     steps:
-      - name: Check out the repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute release metadata
+        id: meta
+        shell: bash
+        run: |
+          INPUT_TAG="${{ github.event.inputs.tag_name }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -n "$LATEST_TAG" ]; then
+              BASE_VER="${LATEST_TAG#v}"
+              TAG="v${BASE_VER}.${{ github.run_number }}"
+            else
+              TAG="v1.0.${{ github.run_number }}"
+            fi
+          fi
+
+          APP_VER="${TAG#v}"
+          IMAGE_NAME="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+
+          {
+            echo "app_version=${APP_VER}"
+            echo "tag=${TAG}"
+            echo "image_name=${IMAGE_NAME}"
+            echo "docker_tags<<EOF"
+            echo "${IMAGE_NAME}:latest"
+            echo "${IMAGE_NAME}:${APP_VER}"
+            if [ "${TAG}" != "${APP_VER}" ]; then
+              echo "${IMAGE_NAME}:${TAG}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Prepared release: tag=${TAG}, app_version=${APP_VER}, image=${IMAGE_NAME}"
+
+  build-binaries:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Save version info
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run Go & Frontend Tests
+        env:
+          CGO_ENABLED: '0'
         run: |
-          git describe --tags > VERSION
+          go vet ./...
+          go test -v -count=1 ./...
+          node --check frontend/core.js frontend/storage.js frontend/api.js frontend/app.js
+          node --test frontend/core.test.js
+
+      - name: Cross-compile Release Binaries & Package Static Assets
+        env:
+          APP_VER: ${{ needs.prepare.outputs.app_version }}
+        run: |
+          mkdir -p release_dist
+          LDFLAGS="-s -w"
+
+          build_target() {
+            local os="$1"
+            local arch="$2"
+            local bin_name="ti-temp-mail-api"
+            if [ "$os" = "windows" ]; then
+              bin_name="ti-temp-mail-api.exe"
+            fi
+            echo "Building ${os}/${arch} (version ${APP_VER})..."
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="${LDFLAGS}" -o "release_dist/${bin_name}" .
+            if [ "$os" = "windows" ]; then
+              (cd release_dist && zip -q "ti-temp-mail-api_${APP_VER}_${os}_${arch}.zip" "${bin_name}")
+            else
+              tar -czf "release_dist/ti-temp-mail-api_${APP_VER}_${os}_${arch}.tar.gz" -C release_dist "${bin_name}"
+            fi
+            rm -f "release_dist/${bin_name}"
+          }
+
+          build_target linux amd64
+          build_target linux arm64
+          build_target windows amd64
+          build_target darwin amd64
+          build_target darwin arm64
+
+          mkdir -p /tmp/frontend_pkg
+          cp frontend/index.html frontend/styles.css frontend/core.js frontend/storage.js frontend/api.js frontend/app.js /tmp/frontend_pkg/
+          (cd /tmp/frontend_pkg && zip -q -r "${GITHUB_WORKSPACE}/release_dist/ti-temp-mail-frontend_${APP_VER}.zip" .)
+
+          mkdir -p /tmp/worker_pkg
+          cp worker/worker.js worker/schema.sql /tmp/worker_pkg/
+          (cd /tmp/worker_pkg && zip -q -r "${GITHUB_WORKSPACE}/release_dist/ti-temp-mail-worker_${APP_VER}.zip" .)
+
+          (cd release_dist && sha256sum ti-temp-mail-* > checksums.sha256.txt)
+          ls -lh release_dist
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ti-temp-mail-release-assets
+          path: release_dist/
+          if-no-files-found: error
+
+  build-docker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -35,27 +154,59 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to the Container registry
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
-          tags: |
-            type=raw,value=latest
-            type=ref,event=tag
-
-      - name: Build and push Docker images
-        uses: docker/build-push-action@v5
+      - name: Build and push multi-arch Docker image
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ needs.prepare.outputs.docker_tags }}
+          labels: |
+            org.opencontainers.image.title=ti-temp-mail-api
+            org.opencontainers.image.version=${{ needs.prepare.outputs.app_version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish-release:
+    needs: [prepare, build-binaries, build-docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ti-temp-mail-release-assets
+          path: release_dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Release ${{ needs.prepare.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release_dist/*
+          body: |
+            ### Docker 镜像 (ghcr.io 多架构: `linux/amd64` / `linux/arm64`)
+            ```bash
+            docker pull ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.app_version }}
+            # 或拉取最新镜像:
+            docker pull ${{ needs.prepare.outputs.image_name }}:latest
+            ```
+
+            ### 附件说明
+            - `ti-temp-mail-api_*`: 各平台零依赖静态可执行二进制文件（`linux`/`windows`/`darwin`）及 `checksums.sha256.txt`
+            - `ti-temp-mail-frontend_*.zip`: 纯静态 Web 前端，可直接部署到 Cloudflare Pages / GitHub Pages / Nginx 或本地浏览器打开
+            - `ti-temp-mail-worker_*.zip`: Cloudflare D1 Worker 脚本与数据库 Schema

@@ -60,6 +60,22 @@ func TestLoadConfig(t *testing.T) {
 		if cfg.MaxEmails != 10000 {
 			t.Fatalf("MaxEmails = %d, want 10000", cfg.MaxEmails)
 		}
+		if cfg.MXDomain != "example.com" {
+			t.Fatalf("MXDomain = %q, want %q", cfg.MXDomain, "example.com")
+		}
+	})
+
+	t.Run("explicit MX_DOMAIN trims whitespace and trailing dot", func(t *testing.T) {
+		t.Setenv("MAIL_DOMAIN", "example.com,alt.example.org")
+		t.Setenv("MX_DOMAIN", "  mx.mailhost.net.  ")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig failed: %v", err)
+		}
+		if cfg.MXDomain != "mx.mailhost.net" {
+			t.Fatalf("MXDomain = %q, want %q", cfg.MXDomain, "mx.mailhost.net")
+		}
 	})
 
 	t.Run("custom MAX_EMAIL_MEMORY and zero MAX_EMAILS", func(t *testing.T) {

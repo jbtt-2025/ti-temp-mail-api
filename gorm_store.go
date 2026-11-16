@@ -134,19 +134,36 @@ func cutoffUnix(now time.Time, ttl time.Duration) (int64, bool) {
 }
 
 func (s *GormStore) CreateMailbox(ctx context.Context, token, mailbox string) (bool, error) {
+	now := s.nowFn()
 	rec := &MailboxRecord{
 		Mailbox:   mailbox,
 		Token:     token,
-		CreatedAt: s.nowFn().Unix(),
+		CreatedAt: now.Unix(),
 	}
-	err := s.db.WithContext(ctx).Create(rec).Error
-	if errors.Is(err, gorm.ErrDuplicatedKey) {
-		return false, nil
-	}
+	cutoff, hasTTL := cutoffUnix(now, s.mailboxTTL)
+
+	var created bool
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Remove an expired record for this address so it can be re-allocated, while preserving active records.
+		if hasTTL {
+			if err := tx.Where("mailbox = ? AND created_at <= ?", mailbox, cutoff).Delete(&MailboxRecord{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Create(rec).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				created = false
+				return nil
+			}
+			return err
+		}
+		created = true
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return created, nil
 }
 
 func (s *GormStore) MailboxExists(ctx context.Context, mailbox string) (bool, error) {

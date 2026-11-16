@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,5 +111,134 @@ func TestHTTPServer_WithSQLiteAndExpiration(t *testing.T) {
 	srv.Handler.ServeHTTP(recList3, reqList)
 	if recList3.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for expired mailbox, got %d", recList3.Code)
+	}
+}
+
+func TestHTTPServer_CORS_Info_And_ExplicitMailboxReapply(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	cfg := &Config{
+		MailDomains:     []string{"a.example.com", "b.example.com"},
+		MXDomain:        "mx.serverhost.net",
+		CreateToken:     "secret-create",
+		StorageType:     "sqlite",
+		DBDSN:           ":memory:",
+		MailboxTTL:      15 * time.Second,
+		EmailTTL:        30 * time.Second,
+		CleanupInterval: time.Minute,
+	}
+
+	store, err := NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	defer store.Close()
+
+	gs := store.(*GormStore)
+	gs.nowFn = func() time.Time { return now }
+	srv := NewHTTPServer(cfg, store)
+
+	// 1. CORS preflight OPTIONS request succeeds with required headers, and GET / renders MX_DOMAIN DNS tutorial.
+	homeReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	homeRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(homeRec, homeReq)
+	if homeRec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d", homeRec.Code)
+	}
+	homeBody := homeRec.Body.String()
+	for _, want := range []string{
+		"a.example.com.   MX   10   mx.serverhost.net.",
+		"*.a.example.com.   MX   10   mx.serverhost.net.",
+	} {
+		if !strings.Contains(homeBody, want) {
+			t.Fatalf("GET / HTML missing %q", want)
+		}
+	}
+
+	optReq := httptest.NewRequest(http.MethodOptions, "/mailbox", nil)
+	optRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(optRec, optReq)
+	if optRec.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS /mailbox status = %d, want 204", optRec.Code)
+	}
+	if got := optRec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want *", got)
+	}
+	if got := optRec.Header().Get("Access-Control-Allow-Headers"); got == "" {
+		t.Fatal("expected non-empty Access-Control-Allow-Headers")
+	}
+
+	// 2. GET /info returns configured domains and requiresCreateToken=true.
+	infoReq := httptest.NewRequest(http.MethodGet, "/info", nil)
+	infoRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(infoRec, infoReq)
+	if infoRec.Code != http.StatusOK {
+		t.Fatalf("GET /info status = %d", infoRec.Code)
+	}
+	if got := infoRec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("GET /info CORS header = %q, want *", got)
+	}
+	var info ServerInfoResponse
+	if err := json.Unmarshal(infoRec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode /info: %v", err)
+	}
+	if !info.RequiresCreateToken || len(info.Domains) != 2 || info.Domains[0] != "a.example.com" || info.Domains[1] != "b.example.com" {
+		t.Fatalf("unexpected /info: %+v", info)
+	}
+
+	// 3. Explicit mailbox create on subdomain under configured domain succeeds.
+	body := []byte(`{"mailbox":"User1@sub.b.example.com"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/mailbox", bytes.NewReader(body))
+	createReq.Header.Set("Authorization", "secret-create")
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("explicit POST /mailbox status = %d, body = %s", createRec.Code, createRec.Body.String())
+	}
+	var first CreateMailboxResponse
+	_ = json.Unmarshal(createRec.Body.Bytes(), &first)
+	if first.Mailbox != "user1@sub.b.example.com" || first.Token == "" {
+		t.Fatalf("unexpected explicit create response: %+v", first)
+	}
+
+	// 4. Re-applying for the same mailbox BEFORE expiration fails with 409 Conflict.
+	dupReq := httptest.NewRequest(http.MethodPost, "/mailbox", bytes.NewReader([]byte(`{"mailbox":"user1@sub.b.example.com"}`)))
+	dupReq.Header.Set("Authorization", "secret-create")
+	dupRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(dupRec, dupReq)
+	if dupRec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for non-expired duplicate mailbox, got %d (%s)", dupRec.Code, dupRec.Body.String())
+	}
+
+	// 5. Malformed mailbox address is rejected with 400 Bad Request, while valid custom MX domain outside MAIL_DOMAIN is accepted.
+	badReq := httptest.NewRequest(http.MethodPost, "/mailbox", bytes.NewReader([]byte(`{"mailbox":"invalid-mailbox"}`)))
+	badReq.Header.Set("Authorization", "secret-create")
+	badRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for malformed mailbox, got %d", badRec.Code)
+	}
+
+	customReq := httptest.NewRequest(http.MethodPost, "/mailbox", bytes.NewReader([]byte(`{"mailbox":"user1@custom-mx.org"}`)))
+	customReq.Header.Set("Authorization", "secret-create")
+	customRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(customRec, customReq)
+	if customRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for valid custom domain outside MAIL_DOMAIN, got %d (%s)", customRec.Code, customRec.Body.String())
+	}
+
+	// 6. After MailboxTTL expires, re-applying yields a fresh token for the same mailbox.
+	now = now.Add(20 * time.Second)
+	reapplyReq := httptest.NewRequest(http.MethodPost, "/mailbox", bytes.NewReader([]byte(`{"mailbox":"user1@sub.b.example.com"}`)))
+	reapplyReq.Header.Set("Authorization", "secret-create")
+	reapplyRec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(reapplyRec, reapplyReq)
+	if reapplyRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created after expiration, got %d (%s)", reapplyRec.Code, reapplyRec.Body.String())
+	}
+	var second CreateMailboxResponse
+	_ = json.Unmarshal(reapplyRec.Body.Bytes(), &second)
+	if second.Mailbox != first.Mailbox || second.Token == "" || second.Token == first.Token {
+		t.Fatalf("expected fresh token for same mailbox after expiration, first=%+v second=%+v", first, second)
 	}
 }
