@@ -6,6 +6,9 @@
 
 ## 快速启动
 
+> [!TIP]
+> `MAIL_DOMAIN` 为邮箱后缀域名（多个用逗号分隔）；`MX_DOMAIN` 为部署本服务的收信域名（可选，不填默认取 `MAIL_DOMAIN` 首个域名），需将 `MX_DOMAIN` 的 `A` / `AAAA` 记录指向运行本容器的机器 IP。
+
 ### 1. 默认内存模式（最简单，重启后清空）
 
 ```bash
@@ -13,6 +16,7 @@ docker run -d \
   --name ti-temp-mail-api \
   --restart unless-stopped \
   -e MAIL_DOMAIN=example.com \
+  -e MX_DOMAIN=mx.example.com \
   -p 8080:8080 \
   -p 25:25 \
   ghcr.io/jbtt-2025/ti-temp-mail-api:latest
@@ -31,6 +35,7 @@ docker run -d \
   --name ti-temp-mail-api \
   --restart unless-stopped \
   -e MAIL_DOMAIN=example.com \
+  -e MX_DOMAIN=mx.example.com \
   -e STORAGE_TYPE=sqlite \
   -e DB_DSN=/app/data/temp-mail.db \
   -e MAILBOX_TTL=24h \
@@ -54,6 +59,7 @@ services:
       - "25:25"
     environment:
       MAIL_DOMAIN: example.com
+      MX_DOMAIN: mx.example.com
       STORAGE_TYPE: sqlite
       DB_DSN: /app/data/temp-mail.db
       MAILBOX_TTL: 24h
@@ -72,6 +78,7 @@ docker run -d \
   --name ti-temp-mail-api \
   --restart unless-stopped \
   -e MAIL_DOMAIN=example.com \
+  -e MX_DOMAIN=mx.example.com \
   -e STORAGE_TYPE=mysql \
   -e DB_DSN="user:password@tcp(127.0.0.1:3306)/tempmail?charset=utf8mb4&parseTime=True&loc=Local" \
   -e MAILBOX_TTL=7d \
@@ -88,6 +95,7 @@ docker run -d \
   --name ti-temp-mail-api \
   --restart unless-stopped \
   -e MAIL_DOMAIN=example.com \
+  -e MX_DOMAIN=mx.example.com \
   -e STORAGE_TYPE=postgres \
   -e DB_DSN="postgres://postgres:password@127.0.0.1:5432/tempmail?sslmode=disable" \
   -e MAILBOX_TTL=7d \
@@ -163,6 +171,7 @@ docker run -d \
   --name ti-temp-mail-api \
   --restart unless-stopped \
   -e MAIL_DOMAIN=example.com \
+  -e MX_DOMAIN=mx.example.com \
   -e STORAGE_TYPE=d1 \
   -e D1_API_URL=https://ti-temp-mail-d1-worker.your-subdomain.workers.dev \
   -e D1_API_TOKEN=你的API_TOKEN \
