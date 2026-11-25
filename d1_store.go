@@ -29,10 +29,15 @@ func NewD1Store(cfg *Config) (*D1Store, error) {
 	if cfg.D1APIToken == "" {
 		return nil, fmt.Errorf("D1_API_TOKEN is required")
 	}
+	transport := &http.Transport{
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	return &D1Store{
 		baseURL:    cfg.D1APIURL,
 		token:      cfg.D1APIToken,
-		client:     &http.Client{Timeout: 15 * time.Second},
+		client:     &http.Client{Timeout: 15 * time.Second, Transport: transport},
 		mailboxTTL: cfg.MailboxTTL,
 		emailTTL:   cfg.EmailTTL,
 		nowFn:      time.Now,
@@ -78,31 +83,43 @@ func (s *D1Store) doJSON(ctx context.Context, method, path string, reqBody, resp
 }
 
 func (s *D1Store) CreateMailbox(ctx context.Context, token, mailbox string) (bool, error) {
+	created, _, err := s.CreateMailboxWithMeta(ctx, token, mailbox)
+	return created, err
+}
+
+func (s *D1Store) CreateMailboxWithMeta(ctx context.Context, token, mailbox string) (bool, int64, error) {
 	now := s.nowFn()
+	createdAt := now.Unix()
 	payload := map[string]any{
 		"token":     token,
 		"mailbox":   mailbox,
-		"createdAt": now.Unix(),
+		"createdAt": createdAt,
 	}
 	if cutoff, ok := cutoffUnix(now, s.mailboxTTL); ok {
 		payload["expiredBefore"] = cutoff
 	}
 	status, err := s.doJSON(ctx, http.MethodPost, "/mailboxes", payload, nil)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if status == http.StatusConflict {
-		return false, nil
+		return false, 0, nil
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return false, fmt.Errorf("d1 worker CreateMailbox returned status %d", status)
+		return false, 0, fmt.Errorf("d1 worker CreateMailbox returned status %d", status)
 	}
-	return true, nil
+	return true, createdAt, nil
 }
 
 func (s *D1Store) MailboxExists(ctx context.Context, mailbox string) (bool, error) {
+	exists, _, err := s.MailboxExistsWithMeta(ctx, mailbox)
+	return exists, err
+}
+
+func (s *D1Store) MailboxExistsWithMeta(ctx context.Context, mailbox string) (bool, int64, error) {
 	var res struct {
-		Exists bool `json:"exists"`
+		Exists    bool   `json:"exists"`
+		CreatedAt *int64 `json:"createdAt"`
 	}
 	path := "/mailboxes/exists?address=" + url.QueryEscape(mailbox)
 	if cutoff, ok := cutoffUnix(s.nowFn(), s.mailboxTTL); ok {
@@ -110,17 +127,27 @@ func (s *D1Store) MailboxExists(ctx context.Context, mailbox string) (bool, erro
 	}
 	status, err := s.doJSON(ctx, http.MethodGet, path, nil, &res)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if status != http.StatusOK {
-		return false, fmt.Errorf("d1 worker MailboxExists returned status %d", status)
+		return false, 0, fmt.Errorf("d1 worker MailboxExists returned status %d", status)
 	}
-	return res.Exists, nil
+	var createdAt int64
+	if res.CreatedAt != nil {
+		createdAt = *res.CreatedAt
+	}
+	return res.Exists, createdAt, nil
 }
 
 func (s *D1Store) GetMailboxByToken(ctx context.Context, token string) (string, bool, error) {
+	mailbox, _, ok, err := s.GetMailboxByTokenWithMeta(ctx, token)
+	return mailbox, ok, err
+}
+
+func (s *D1Store) GetMailboxByTokenWithMeta(ctx context.Context, token string) (string, int64, bool, error) {
 	var res struct {
-		Mailbox string `json:"mailbox"`
+		Mailbox   string `json:"mailbox"`
+		CreatedAt *int64 `json:"createdAt"`
 	}
 	payload := map[string]any{"token": token}
 	if cutoff, ok := cutoffUnix(s.nowFn(), s.mailboxTTL); ok {
@@ -128,15 +155,19 @@ func (s *D1Store) GetMailboxByToken(ctx context.Context, token string) (string, 
 	}
 	status, err := s.doJSON(ctx, http.MethodPost, "/mailboxes/by-token", payload, &res)
 	if err != nil {
-		return "", false, err
+		return "", 0, false, err
 	}
 	if status == http.StatusNotFound {
-		return "", false, nil
+		return "", 0, false, nil
 	}
 	if status != http.StatusOK {
-		return "", false, fmt.Errorf("d1 worker GetMailboxByToken returned status %d", status)
+		return "", 0, false, fmt.Errorf("d1 worker GetMailboxByToken returned status %d", status)
 	}
-	return res.Mailbox, true, nil
+	var createdAt int64
+	if res.CreatedAt != nil {
+		createdAt = *res.CreatedAt
+	}
+	return res.Mailbox, createdAt, true, nil
 }
 
 func (s *D1Store) SaveEmail(ctx context.Context, email *Email) (bool, error) {
@@ -204,7 +235,31 @@ func (s *D1Store) GetEmailByID(ctx context.Context, id string) (*Email, bool, er
 	return res.Email, true, nil
 }
 
+type optionalInt64 struct {
+	Present bool
+	Value   *int64
+}
+
+func (o *optionalInt64) UnmarshalJSON(data []byte) error {
+	o.Present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		o.Value = nil
+		return nil
+	}
+	var v int64
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	o.Value = &v
+	return nil
+}
+
 func (s *D1Store) CleanupExpired(ctx context.Context, now time.Time) (int64, int64, error) {
+	res, err := s.CleanupExpiredWithHint(ctx, now)
+	return res.DeletedEmails, res.DeletedMailboxes, err
+}
+
+func (s *D1Store) CleanupExpiredWithHint(ctx context.Context, now time.Time) (cleanupResult, error) {
 	payload := map[string]any{}
 	if cutoff, ok := cutoffUnix(now, s.emailTTL); ok {
 		payload["emailBefore"] = cutoff
@@ -213,20 +268,29 @@ func (s *D1Store) CleanupExpired(ctx context.Context, now time.Time) (int64, int
 		payload["mailboxBefore"] = cutoff
 	}
 	if len(payload) == 0 {
-		return 0, 0, nil
+		return cleanupResult{}, nil
 	}
 	var res struct {
-		DeletedEmails    int64 `json:"deletedEmails"`
-		DeletedMailboxes int64 `json:"deletedMailboxes"`
+		DeletedEmails     int64         `json:"deletedEmails"`
+		DeletedMailboxes  int64         `json:"deletedMailboxes"`
+		EarliestEmailAt   optionalInt64 `json:"earliestEmailAt"`
+		EarliestMailboxAt optionalInt64 `json:"earliestMailboxAt"`
 	}
 	status, err := s.doJSON(ctx, http.MethodPost, "/cleanup", payload, &res)
 	if err != nil {
-		return 0, 0, err
+		return cleanupResult{}, err
 	}
 	if status != http.StatusOK {
-		return 0, 0, fmt.Errorf("d1 worker CleanupExpired returned status %d", status)
+		return cleanupResult{}, fmt.Errorf("d1 worker CleanupExpired returned status %d", status)
 	}
-	return res.DeletedEmails, res.DeletedMailboxes, nil
+	return cleanupResult{
+		DeletedEmails:     res.DeletedEmails,
+		DeletedMailboxes:  res.DeletedMailboxes,
+		HasEmailHint:      res.EarliestEmailAt.Present,
+		EarliestEmailAt:   res.EarliestEmailAt.Value,
+		HasMailboxHint:    res.EarliestMailboxAt.Present,
+		EarliestMailboxAt: res.EarliestMailboxAt.Value,
+	}, nil
 }
 
 func (s *D1Store) Close() error {

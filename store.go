@@ -22,15 +22,52 @@ type Store interface {
 	Close() error
 }
 
+// mailboxMetaStore is optionally implemented by stores that expose CreatedAt
+// so a cache wrapper can evaluate MailboxTTL locally without extra DB calls.
+type mailboxMetaStore interface {
+	CreateMailboxWithMeta(ctx context.Context, token, mailbox string) (created bool, createdAt int64, err error)
+	MailboxExistsWithMeta(ctx context.Context, mailbox string) (exists bool, createdAt int64, err error)
+	GetMailboxByTokenWithMeta(ctx context.Context, token string) (mailbox string, createdAt int64, ok bool, err error)
+}
+
+type cleanupResult struct {
+	DeletedEmails      int64
+	DeletedMailboxes   int64
+	HasEmailHint       bool
+	EarliestEmailAt    *int64 // nil means table currently empty
+	HasMailboxHint     bool
+	EarliestMailboxAt  *int64 // nil means table currently empty
+}
+
+// cleanupHintStore is optionally implemented by stores that report the earliest
+// remaining record timestamps so idle cleanup loops can skip empty DB calls.
+type cleanupHintStore interface {
+	CleanupExpiredWithHint(ctx context.Context, now time.Time) (cleanupResult, error)
+}
+
 // NewStore builds the configured storage backend.
 func NewStore(cfg *Config) (Store, error) {
 	switch cfg.StorageType {
 	case "", "memory":
 		return NewMemoryStore(cfg.MaxMailboxes, cfg.MaxEmails, cfg.MaxEmailMemory), nil
 	case "sqlite", "mysql", "postgres":
-		return NewGormStore(cfg)
+		backend, err := NewGormStore(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.CacheEnabled {
+			return NewCachedStore(backend, cfg), nil
+		}
+		return backend, nil
 	case "d1":
-		return NewD1Store(cfg)
+		backend, err := NewD1Store(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.CacheEnabled {
+			return NewCachedStore(backend, cfg), nil
+		}
+		return backend, nil
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", cfg.StorageType)
 	}

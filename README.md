@@ -177,7 +177,7 @@ docker run -d \
   -e D1_API_TOKEN=你的API_TOKEN \
   -e MAILBOX_TTL=24h \
   -e EMAIL_TTL=12h \
-  -e CLEANUP_INTERVAL=5m \
+  -e CLEANUP_INTERVAL=1h \
   -p 8080:8080 \
   -p 25:25 \
   ghcr.io/jbtt-2025/ti-temp-mail-api:latest
@@ -217,7 +217,12 @@ docker run -d \
 | `D1_API_TOKEN` | — | `STORAGE_TYPE=d1` 时必填，对应 Worker 的 `API_TOKEN` |
 | `MAILBOX_TTL` | `24h` | 邮箱有效期（支持 `30m`、`24h`、`7d`；`0` 表示永不过期；调整后重启立即生效） |
 | `EMAIL_TTL` | `24h` | 邮件有效期（支持 `30m`、`24h`、`7d`；`0` 表示永不过期；调整后重启立即生效） |
-| `CLEANUP_INTERVAL` | `5m` | 定时清理过期邮箱与邮件的周期 |
+| `CLEANUP_INTERVAL` | `5m`（`d1` 模式默认 `1h`） | 定时清理过期邮箱与邮件的周期；空闲无过期数据时会自动跳过冗余请求 |
+| `CACHE_ENABLED` | `true` | 是否为持久化后端启用内存 LRU + 写穿缓存（显著减少 D1/DB 请求，单实例默认强一致） |
+| `CACHE_MAX_MAILBOXES` | `10000` | 邮箱与收件箱索引缓存的最大条数 |
+| `CACHE_MAX_EMAIL_MEMORY` | `100MB` | 缓存邮件正文的总内存上限（与内存模式一致，支持 `B`/`KB`/`MB`/`GB`；`0` 表示仅缓存邮箱与 Token） |
+| `CACHE_LIST_TTL` | `0` | 邮件列表缓存强制回源周期；`0` 表示单实例写穿强一致，多实例共享 DB 时可设为如 `30s` |
+| `CACHE_NEGATIVE_TTL` | `60s` | 不存在邮箱 / 无效 Token 的负缓存时间，拦截恶意扫描穿透 |
 
 ---
 

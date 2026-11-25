@@ -11,29 +11,36 @@ import (
 )
 
 const (
-	defaultMaxEmailMemory  int64         = 100 * 1024 * 1024 // 100MB
-	defaultMailboxTTL      time.Duration = 24 * time.Hour
-	defaultEmailTTL        time.Duration = 24 * time.Hour
-	defaultCleanupInterval time.Duration = 5 * time.Minute
-	defaultSQLiteDSN                     = "temp-mail.db"
+	defaultMaxEmailMemory   int64         = 100 * 1024 * 1024 // 100MB
+	defaultMailboxTTL       time.Duration = 24 * time.Hour
+	defaultEmailTTL         time.Duration = 24 * time.Hour
+	defaultCleanupInterval  time.Duration = 5 * time.Minute
+	defaultD1CleanupInterval time.Duration = time.Hour
+	defaultCacheNegativeTTL time.Duration = time.Minute
+	defaultSQLiteDSN                      = "temp-mail.db"
 )
 
 type Config struct {
-	MailDomains     []string      // MAIL_DOMAIN, comma-separated, required
-	MXDomain        string        // MX_DOMAIN, optional, defaults to MailDomains[0]
-	SMTPPort        int           // SMTP_PORT, default 25
-	HTTPPort        int           // HTTP_PORT, default 8080
-	MaxEmails       int           // MAX_EMAILS, default 10000 (memory mode)
-	MaxEmailMemory  int64         // MAX_EMAIL_MEMORY, default 100MB (memory mode)
-	MaxMailboxes    int           // MAX_MAILBOXES, default 10000 (memory mode)
-	CreateToken     string        // CREATE_TOKEN, optional
-	StorageType     string        // STORAGE_TYPE: memory|sqlite|mysql|postgres|d1, default memory
-	DBDSN           string        // DB_DSN (or SQLITE_PATH for sqlite)
-	D1APIURL        string        // D1_API_URL (required when STORAGE_TYPE=d1)
-	D1APIToken      string        // D1_API_TOKEN (required when STORAGE_TYPE=d1)
-	MailboxTTL      time.Duration // MAILBOX_TTL, default 24h (non-memory, 0 = never expire)
-	EmailTTL        time.Duration // EMAIL_TTL, default 24h (non-memory, 0 = never expire)
-	CleanupInterval time.Duration // CLEANUP_INTERVAL, default 5m (non-memory)
+	MailDomains         []string      // MAIL_DOMAIN, comma-separated, required
+	MXDomain            string        // MX_DOMAIN, optional, defaults to MailDomains[0]
+	SMTPPort            int           // SMTP_PORT, default 25
+	HTTPPort            int           // HTTP_PORT, default 8080
+	MaxEmails           int           // MAX_EMAILS, default 10000 (memory mode)
+	MaxEmailMemory      int64         // MAX_EMAIL_MEMORY, default 100MB (memory mode)
+	MaxMailboxes        int           // MAX_MAILBOXES, default 10000 (memory mode)
+	CreateToken         string        // CREATE_TOKEN, optional
+	StorageType         string        // STORAGE_TYPE: memory|sqlite|mysql|postgres|d1, default memory
+	DBDSN               string        // DB_DSN (or SQLITE_PATH for sqlite)
+	D1APIURL            string        // D1_API_URL (required when STORAGE_TYPE=d1)
+	D1APIToken          string        // D1_API_TOKEN (required when STORAGE_TYPE=d1)
+	MailboxTTL          time.Duration // MAILBOX_TTL, default 24h (non-memory, 0 = never expire)
+	EmailTTL            time.Duration // EMAIL_TTL, default 24h (non-memory, 0 = never expire)
+	CleanupInterval     time.Duration // CLEANUP_INTERVAL, default 5m (1h for d1)
+	CacheEnabled        bool          // CACHE_ENABLED, default true (for persistent stores)
+	CacheMaxMailboxes   int           // CACHE_MAX_MAILBOXES, default 10000
+	CacheMaxEmailMemory int64         // CACHE_MAX_EMAIL_MEMORY, default 100MB (0 disables email caching)
+	CacheListTTL        time.Duration // CACHE_LIST_TTL, default 0 (0 = authoritative single-instance write-through)
+	CacheNegativeTTL    time.Duration // CACHE_NEGATIVE_TTL, default 60s
 }
 
 func LoadConfig() (*Config, error) {
@@ -59,18 +66,23 @@ func LoadConfig() (*Config, error) {
 	}
 
 	cfg := &Config{
-		MailDomains:     domains,
-		MXDomain:        mxDomain,
-		SMTPPort:        25,
-		HTTPPort:        8080,
-		MaxEmails:       10000,
-		MaxEmailMemory:  defaultMaxEmailMemory,
-		MaxMailboxes:    10000,
-		CreateToken:     os.Getenv("CREATE_TOKEN"),
-		StorageType:     "memory",
-		MailboxTTL:      defaultMailboxTTL,
-		EmailTTL:        defaultEmailTTL,
-		CleanupInterval: defaultCleanupInterval,
+		MailDomains:         domains,
+		MXDomain:            mxDomain,
+		SMTPPort:            25,
+		HTTPPort:            8080,
+		MaxEmails:           10000,
+		MaxEmailMemory:      defaultMaxEmailMemory,
+		MaxMailboxes:        10000,
+		CreateToken:         os.Getenv("CREATE_TOKEN"),
+		StorageType:         "memory",
+		MailboxTTL:          defaultMailboxTTL,
+		EmailTTL:            defaultEmailTTL,
+		CleanupInterval:     defaultCleanupInterval,
+		CacheEnabled:        true,
+		CacheMaxMailboxes:   10000,
+		CacheMaxEmailMemory: defaultMaxEmailMemory,
+		CacheListTTL:        0,
+		CacheNegativeTTL:    defaultCacheNegativeTTL,
 	}
 
 	if v := os.Getenv("SMTP_PORT"); v != "" {
@@ -156,6 +168,51 @@ func LoadConfig() (*Config, error) {
 			return nil, errors.New("invalid CLEANUP_INTERVAL: must be greater than 0")
 		}
 		cfg.CleanupInterval = d
+	} else if cfg.StorageType == "d1" {
+		cfg.CleanupInterval = defaultD1CleanupInterval
+	}
+
+	if v := os.Getenv("CACHE_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("invalid CACHE_ENABLED: %w", err)
+		}
+		cfg.CacheEnabled = b
+	}
+
+	if v := os.Getenv("CACHE_MAX_MAILBOXES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CACHE_MAX_MAILBOXES: %w", err)
+		}
+		if n <= 0 {
+			return nil, errors.New("invalid CACHE_MAX_MAILBOXES: must be greater than 0")
+		}
+		cfg.CacheMaxMailboxes = n
+	}
+
+	if v := os.Getenv("CACHE_MAX_EMAIL_MEMORY"); v != "" {
+		n, err := parseByteSize(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CACHE_MAX_EMAIL_MEMORY: %w", err)
+		}
+		cfg.CacheMaxEmailMemory = n
+	}
+
+	if v := os.Getenv("CACHE_LIST_TTL"); v != "" {
+		d, err := parseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CACHE_LIST_TTL: %w", err)
+		}
+		cfg.CacheListTTL = d
+	}
+
+	if v := os.Getenv("CACHE_NEGATIVE_TTL"); v != "" {
+		d, err := parseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CACHE_NEGATIVE_TTL: %w", err)
+		}
+		cfg.CacheNegativeTTL = d
 	}
 
 	cfg.DBDSN = strings.TrimSpace(os.Getenv("DB_DSN"))

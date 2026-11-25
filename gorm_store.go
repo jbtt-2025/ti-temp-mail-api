@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -134,11 +135,17 @@ func cutoffUnix(now time.Time, ttl time.Duration) (int64, bool) {
 }
 
 func (s *GormStore) CreateMailbox(ctx context.Context, token, mailbox string) (bool, error) {
+	created, _, err := s.CreateMailboxWithMeta(ctx, token, mailbox)
+	return created, err
+}
+
+func (s *GormStore) CreateMailboxWithMeta(ctx context.Context, token, mailbox string) (bool, int64, error) {
 	now := s.nowFn()
+	createdAt := now.Unix()
 	rec := &MailboxRecord{
 		Mailbox:   mailbox,
 		Token:     token,
-		CreatedAt: now.Unix(),
+		CreatedAt: createdAt,
 	}
 	cutoff, hasTTL := cutoffUnix(now, s.mailboxTTL)
 
@@ -161,37 +168,54 @@ func (s *GormStore) CreateMailbox(ctx context.Context, token, mailbox string) (b
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
-	return created, nil
+	if !created {
+		return false, 0, nil
+	}
+	return true, createdAt, nil
 }
 
 func (s *GormStore) MailboxExists(ctx context.Context, mailbox string) (bool, error) {
-	q := s.db.WithContext(ctx).Model(&MailboxRecord{}).Where("mailbox = ?", mailbox)
-	if cutoff, ok := cutoffUnix(s.nowFn(), s.mailboxTTL); ok {
-		q = q.Where("created_at > ?", cutoff)
-	}
-	var count int64
-	if err := q.Count(&count).Error; err != nil {
-		return false, err
-	}
-	return count > 0, nil
+	exists, _, err := s.MailboxExistsWithMeta(ctx, mailbox)
+	return exists, err
 }
 
-func (s *GormStore) GetMailboxByToken(ctx context.Context, token string) (string, bool, error) {
-	q := s.db.WithContext(ctx).Select("mailbox").Where("token = ?", token)
+func (s *GormStore) MailboxExistsWithMeta(ctx context.Context, mailbox string) (bool, int64, error) {
+	q := s.db.WithContext(ctx).Select("created_at").Where("mailbox = ?", mailbox)
 	if cutoff, ok := cutoffUnix(s.nowFn(), s.mailboxTTL); ok {
 		q = q.Where("created_at > ?", cutoff)
 	}
 	var rec MailboxRecord
 	err := q.Take(&rec).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", false, nil
+		return false, 0, nil
 	}
 	if err != nil {
-		return "", false, err
+		return false, 0, err
 	}
-	return rec.Mailbox, true, nil
+	return true, rec.CreatedAt, nil
+}
+
+func (s *GormStore) GetMailboxByToken(ctx context.Context, token string) (string, bool, error) {
+	mailbox, _, ok, err := s.GetMailboxByTokenWithMeta(ctx, token)
+	return mailbox, ok, err
+}
+
+func (s *GormStore) GetMailboxByTokenWithMeta(ctx context.Context, token string) (string, int64, bool, error) {
+	q := s.db.WithContext(ctx).Select("mailbox, created_at").Where("token = ?", token)
+	if cutoff, ok := cutoffUnix(s.nowFn(), s.mailboxTTL); ok {
+		q = q.Where("created_at > ?", cutoff)
+	}
+	var rec MailboxRecord
+	err := q.Take(&rec).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, err
+	}
+	return rec.Mailbox, rec.CreatedAt, true, nil
 }
 
 func (s *GormStore) SaveEmail(ctx context.Context, email *Email) (bool, error) {
@@ -246,16 +270,30 @@ func (s *GormStore) GetEmailByID(ctx context.Context, id string) (*Email, bool, 
 }
 
 func (s *GormStore) CleanupExpired(ctx context.Context, now time.Time) (int64, int64, error) {
-	var deletedEmails, deletedMailboxes int64
+	res, err := s.CleanupExpiredWithHint(ctx, now)
+	return res.DeletedEmails, res.DeletedMailboxes, err
+}
+
+func (s *GormStore) CleanupExpiredWithHint(ctx context.Context, now time.Time) (cleanupResult, error) {
+	var out cleanupResult
 
 	if cutoff, ok := cutoffUnix(now, s.emailTTL); ok {
 		res := s.db.WithContext(ctx).
 			Where("received_at <= ?", cutoff).
 			Delete(&EmailRecord{})
 		if res.Error != nil {
-			return 0, 0, res.Error
+			return out, res.Error
 		}
-		deletedEmails = res.RowsAffected
+		out.DeletedEmails = res.RowsAffected
+
+		var minTS sql.NullInt64
+		if err := s.db.WithContext(ctx).Model(&EmailRecord{}).Select("MIN(received_at)").Scan(&minTS).Error; err == nil {
+			out.HasEmailHint = true
+			if minTS.Valid {
+				v := minTS.Int64
+				out.EarliestEmailAt = &v
+			}
+		}
 	}
 
 	if cutoff, ok := cutoffUnix(now, s.mailboxTTL); ok {
@@ -263,12 +301,21 @@ func (s *GormStore) CleanupExpired(ctx context.Context, now time.Time) (int64, i
 			Where("created_at <= ?", cutoff).
 			Delete(&MailboxRecord{})
 		if res.Error != nil {
-			return deletedEmails, 0, res.Error
+			return out, res.Error
 		}
-		deletedMailboxes = res.RowsAffected
+		out.DeletedMailboxes = res.RowsAffected
+
+		var minTS sql.NullInt64
+		if err := s.db.WithContext(ctx).Model(&MailboxRecord{}).Select("MIN(created_at)").Scan(&minTS).Error; err == nil {
+			out.HasMailboxHint = true
+			if minTS.Valid {
+				v := minTS.Int64
+				out.EarliestMailboxAt = &v
+			}
+		}
 	}
 
-	return deletedEmails, deletedMailboxes, nil
+	return out, nil
 }
 
 func (s *GormStore) Close() error {

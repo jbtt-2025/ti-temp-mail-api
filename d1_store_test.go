@@ -70,7 +70,12 @@ func TestD1Store_WorkerAPIProtocol(t *testing.T) {
 				minCreatedAt, _ := strconv.ParseInt(r.URL.Query().Get("minCreatedAt"), 10, 64)
 				exists = rec.createdAt > minCreatedAt
 			}
-			_ = json.NewEncoder(w).Encode(map[string]bool{"exists": exists})
+			var createdAtPtr *int64
+			if exists {
+				v := rec.createdAt
+				createdAtPtr = &v
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"exists": exists, "createdAt": createdAtPtr})
 
 		case r.Method == http.MethodPost && r.URL.Path == "/mailboxes/by-token":
 			var body struct {
@@ -88,7 +93,7 @@ func TestD1Store_WorkerAPIProtocol(t *testing.T) {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"mailbox": addr})
+			_ = json.NewEncoder(w).Encode(map[string]any{"mailbox": addr, "createdAt": rec.createdAt})
 
 		case r.Method == http.MethodPost && r.URL.Path == "/emails":
 			var body struct {
@@ -151,11 +156,15 @@ func TestD1Store_WorkerAPIProtocol(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			var delE, delM int64
+			var earliestE, earliestM *int64
 			if body.EmailBefore != nil {
 				for id, e := range emails {
 					if e.ReceivedAt <= *body.EmailBefore {
 						delete(emails, id)
 						delE++
+					} else if earliestE == nil || e.ReceivedAt < *earliestE {
+						v := e.ReceivedAt
+						earliestE = &v
 					}
 				}
 			}
@@ -165,12 +174,17 @@ func TestD1Store_WorkerAPIProtocol(t *testing.T) {
 						delete(tokens, rec.token)
 						delete(mailboxes, addr)
 						delM++
+					} else if earliestM == nil || rec.createdAt < *earliestM {
+						v := rec.createdAt
+						earliestM = &v
 					}
 				}
 			}
-			_ = json.NewEncoder(w).Encode(map[string]int64{
-				"deletedEmails":    delE,
-				"deletedMailboxes": delM,
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"deletedEmails":     delE,
+				"deletedMailboxes":  delM,
+				"earliestEmailAt":   earliestE,
+				"earliestMailboxAt": earliestM,
 			})
 
 		default:

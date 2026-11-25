@@ -69,13 +69,6 @@ export default {
         const expiredBefore = parseOptionalInt(body.expiredBefore);
 
         try {
-          if (expiredBefore !== null) {
-            await env.DB.prepare(
-              "DELETE FROM mailboxes WHERE mailbox = ? AND created_at <= ?"
-            )
-              .bind(mailbox, expiredBefore)
-              .run();
-          }
           await env.DB.prepare(
             "INSERT INTO mailboxes (mailbox, token, created_at) VALUES (?, ?, ?)"
           )
@@ -84,10 +77,33 @@ export default {
           return jsonResponse({ created: true }, 201);
         } catch (err) {
           const msg = String(err && err.message ? err.message : err);
-          if (msg.includes("UNIQUE") || msg.includes("PRIMARY KEY") || msg.includes("SQLITE_CONSTRAINT")) {
-            return jsonResponse({ created: false, error: "mailbox already exists" }, 409);
+          const isConstraint = msg.includes("UNIQUE") || msg.includes("PRIMARY KEY") || msg.includes("SQLITE_CONSTRAINT");
+          if (!isConstraint) {
+            throw err;
           }
-          throw err;
+          if (expiredBefore !== null) {
+            const delRes = await env.DB.prepare(
+              "DELETE FROM mailboxes WHERE mailbox = ? AND created_at <= ?"
+            )
+              .bind(mailbox, expiredBefore)
+              .run();
+            if ((delRes.meta?.changes ?? 0) > 0) {
+              try {
+                await env.DB.prepare(
+                  "INSERT INTO mailboxes (mailbox, token, created_at) VALUES (?, ?, ?)"
+                )
+                  .bind(mailbox, token, createdAt)
+                  .run();
+                return jsonResponse({ created: true }, 201);
+              } catch (retryErr) {
+                const retryMsg = String(retryErr && retryErr.message ? retryErr.message : retryErr);
+                if (!(retryMsg.includes("UNIQUE") || retryMsg.includes("PRIMARY KEY") || retryMsg.includes("SQLITE_CONSTRAINT"))) {
+                  throw retryErr;
+                }
+              }
+            }
+          }
+          return jsonResponse({ created: false, error: "mailbox already exists" }, 409);
         }
       }
 
@@ -98,10 +114,10 @@ export default {
         }
         const minCreatedAt = parseOptionalInt(searchParams.get("minCreatedAt"));
         const stmt = minCreatedAt !== null
-          ? env.DB.prepare("SELECT 1 AS ok FROM mailboxes WHERE mailbox = ? AND created_at > ? LIMIT 1").bind(address, minCreatedAt)
-          : env.DB.prepare("SELECT 1 AS ok FROM mailboxes WHERE mailbox = ? LIMIT 1").bind(address);
+          ? env.DB.prepare("SELECT created_at FROM mailboxes WHERE mailbox = ? AND created_at > ? LIMIT 1").bind(address, minCreatedAt)
+          : env.DB.prepare("SELECT created_at FROM mailboxes WHERE mailbox = ? LIMIT 1").bind(address);
         const row = await stmt.first();
-        return jsonResponse({ exists: Boolean(row) }, 200);
+        return jsonResponse({ exists: Boolean(row), createdAt: row ? row.created_at : null }, 200);
       }
 
       if (pathname === "/mailboxes/by-token" && (request.method === "POST" || request.method === "GET")) {
@@ -119,13 +135,13 @@ export default {
           return jsonResponse({ error: "not found" }, 404);
         }
         const stmt = minCreatedAt !== null
-          ? env.DB.prepare("SELECT mailbox FROM mailboxes WHERE token = ? AND created_at > ? LIMIT 1").bind(token, minCreatedAt)
-          : env.DB.prepare("SELECT mailbox FROM mailboxes WHERE token = ? LIMIT 1").bind(token);
+          ? env.DB.prepare("SELECT mailbox, created_at FROM mailboxes WHERE token = ? AND created_at > ? LIMIT 1").bind(token, minCreatedAt)
+          : env.DB.prepare("SELECT mailbox, created_at FROM mailboxes WHERE token = ? LIMIT 1").bind(token);
         const row = await stmt.first();
         if (!row) {
           return jsonResponse({ error: "not found" }, 404);
         }
-        return jsonResponse({ mailbox: row.mailbox }, 200);
+        return jsonResponse({ mailbox: row.mailbox, createdAt: row.created_at }, 200);
       }
 
       if (request.method === "POST" && pathname === "/emails") {
@@ -220,7 +236,25 @@ export default {
           deletedMailboxes = mboxRes.meta?.changes ?? 0;
         }
 
-        return jsonResponse({ deletedEmails, deletedMailboxes }, 200);
+        const minEmailRow = emailBefore !== null
+          ? await env.DB.prepare("SELECT MIN(received_at) AS min_ts FROM emails").first()
+          : null;
+        const minMailboxRow = mailboxBefore !== null
+          ? await env.DB.prepare("SELECT MIN(created_at) AS min_ts FROM mailboxes").first()
+          : null;
+        const earliestEmailAt = minEmailRow && minEmailRow.min_ts !== null && minEmailRow.min_ts !== undefined
+          ? Number(minEmailRow.min_ts)
+          : null;
+        const earliestMailboxAt = minMailboxRow && minMailboxRow.min_ts !== null && minMailboxRow.min_ts !== undefined
+          ? Number(minMailboxRow.min_ts)
+          : null;
+
+        return jsonResponse({
+          deletedEmails,
+          deletedMailboxes,
+          ...(emailBefore !== null ? { earliestEmailAt } : {}),
+          ...(mailboxBefore !== null ? { earliestMailboxAt } : {}),
+        }, 200);
       }
 
       return jsonResponse({ error: "Not Found" }, 404);

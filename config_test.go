@@ -196,6 +196,25 @@ func TestLoadConfig_StorageModes(t *testing.T) {
 		if cfg.D1APIURL != "https://example.workers.dev" {
 			t.Fatalf("expected trailing slash trimmed, got %q", cfg.D1APIURL)
 		}
+		if cfg.CleanupInterval != time.Hour {
+			t.Fatalf("expected d1 default CleanupInterval=1h, got %v", cfg.CleanupInterval)
+		}
+		if !cfg.CacheEnabled || cfg.CacheMaxEmailMemory != 100*1024*1024 || cfg.CacheMaxMailboxes != 10000 {
+			t.Fatalf("unexpected default cache config: %+v", cfg)
+		}
+
+		t.Setenv("CACHE_ENABLED", "false")
+		t.Setenv("CACHE_MAX_EMAIL_MEMORY", "32MB")
+		t.Setenv("CACHE_LIST_TTL", "15s")
+		t.Setenv("CACHE_NEGATIVE_TTL", "45s")
+		t.Setenv("CLEANUP_INTERVAL", "20m")
+		cfg2, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig custom cache failed: %v", err)
+		}
+		if cfg2.CacheEnabled || cfg2.CacheMaxEmailMemory != 32*1024*1024 || cfg2.CacheListTTL != 15*time.Second || cfg2.CacheNegativeTTL != 45*time.Second || cfg2.CleanupInterval != 20*time.Minute {
+			t.Fatalf("unexpected custom cache config: %+v", cfg2)
+		}
 	})
 
 	t.Run("reject invalid storage type and zero cleanup interval", func(t *testing.T) {
