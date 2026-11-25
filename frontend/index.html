@@ -33,7 +33,7 @@
 
         <button id="btnTopCreate" class="btn btn-primary btn-sm">+ 申请邮箱</button>
         <button id="btnTopImport" class="btn btn-sm">📥 导入</button>
-        <button id="btnTopExport" class="btn btn-sm">💾 导出 JSONL</button>
+        <button id="btnTopExport" class="btn btn-sm">💾 导出</button>
 
         <div class="divider-v"></div>
 
@@ -149,12 +149,13 @@
           <button id="btnSyncAll" class="btn" type="button">⚡ 一键同步所有</button>
           <div class="grid-2">
             <button id="btnSidebarImport" class="btn btn-sm" type="button">📥 批量导入</button>
-            <button id="btnSidebarExport" class="btn btn-sm" type="button">💾 导出 JSONL</button>
+            <button id="btnSidebarExport" class="btn btn-sm" type="button">💾 导出配置/凭证</button>
           </div>
           <div class="grid-2">
             <button id="btnReapplyAllExpired" class="btn btn-sm btn-warn" type="button">🔄 重申失效</button>
             <button id="btnPurgeExpired" class="btn btn-sm btn-danger" type="button">🧹 清理失效</button>
           </div>
+          <button id="btnOpenCleanupEmails" class="btn btn-sm" type="button">🗑️ 清理本地邮件缓存</button>
         </div>
       </aside>
 
@@ -171,6 +172,7 @@
                 <input id="mailSearchInput" class="input" type="text" placeholder="搜索发件人、主题、验证码、邮箱..." />
               </div>
               <button id="btnRefreshCurrent" class="btn btn-sm" title="刷新当前选中或全部邮箱邮件" type="button">↻</button>
+              <button id="btnQuickCleanupEmails" class="btn btn-sm" title="按时间清理本地邮件缓存" type="button">🗑️</button>
             </div>
 
             <div class="subtabs">
@@ -331,8 +333,8 @@
     <div class="modal-panel" style="max-width:720px;">
       <div class="modal-header">
         <div>
-          <h3>📥 批量导入邮箱凭证 (.jsonl)</h3>
-          <p>支持导入由本工具导出的 JSONL 文件（含 upstream + token + mail + mail_token），也可粘贴文本导入</p>
+          <h3>📥 导入前端配置与邮箱凭证 (.jsonl / .json)</h3>
+          <p>支持导入本工具导出的前端配置（settings）与邮箱凭证，自动忽略 email 本地邮件内容</p>
         </div>
         <button class="btn-icon" data-close-modal="importModal" type="button">✕</button>
       </div>
@@ -340,8 +342,19 @@
       <div class="modal-body">
         <div id="importDropzone" class="dropzone">
           <div style="font-weight:600;margin-bottom:4px;">点击选择文件 或 拖拽 .jsonl / .json / .txt 文件到此处</div>
-          <div class="form-hint">每行格式：{"upstream":"...","token":"...","mail":"...","mail_token":"..."}</div>
+          <div class="form-hint">支持整包 JSON / JSONL（配置行 + 账号行），不含且自动忽略本地邮件正文</div>
           <input id="inputImportFile" type="file" accept=".jsonl,.json,.txt" class="hidden" />
+        </div>
+
+        <div id="importSettingsNotice" class="hidden" style="padding:10px 12px;border-radius:8px;background:var(--bg-blue-soft);border:1px solid rgba(37,99,235,0.3);display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:12px;font-weight:600;color:var(--text-blue);">✓ 检测到前端配置数据</span>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+              <input id="chkImportApplySettings" type="checkbox" checked />
+              <span>应用导入的前端配置</span>
+            </label>
+          </div>
+          <div id="importSettingsSummary" class="form-hint mono"></div>
         </div>
 
         <div class="form-field">
@@ -411,13 +424,13 @@
     </div>
   </div>
 
-  <!-- 弹窗 3: 导出 JSONL -->
+  <!-- 弹窗 3: 导出配置与凭证 -->
   <div id="exportModal" class="modal-backdrop hidden">
     <div class="modal-panel">
       <div class="modal-header">
         <div>
-          <h3>💾 导出邮箱与完整凭证 (.jsonl)</h3>
-          <p>导出上游地址 (upstream) + 创建 TOKEN (token) + 邮箱 (mail) + 邮箱凭证 (mail_token)</p>
+          <h3>💾 导出前端配置与邮箱凭证</h3>
+          <p>导出上游地址、CREATE_TOKEN、自定义域名等前端配置及邮箱凭证（自动忽略本地邮件缓存）</p>
         </div>
         <button class="btn-icon" data-close-modal="exportModal" type="button">✕</button>
       </div>
@@ -425,7 +438,7 @@
       <div class="modal-body">
         <div class="form-grid">
           <div class="form-field">
-            <label class="form-label">导出范围</label>
+            <label class="form-label">导出邮箱范围</label>
             <select id="selectExportScope" class="select">
               <option value="all">全部邮箱</option>
               <option value="active">仅正常活跃邮箱</option>
@@ -438,12 +451,17 @@
             <label class="form-label">导出格式</label>
             <select id="selectExportFormat" class="select">
               <option value="jsonl">JSON Lines (.jsonl) - 推荐</option>
-              <option value="json">JSON 数组 (.json)</option>
+              <option value="json">JSON 配置与凭证包 (.json)</option>
               <option value="delim">四段式文本 (upstream----token----mail----mail_token)</option>
               <option value="mail_only">仅邮箱地址 (.txt)</option>
             </select>
           </div>
         </div>
+
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+          <input id="chkExportIncludeSettings" type="checkbox" checked />
+          <span>同时导出前端配置（上游地址、TOKEN、域名列表与轮换策略、轮询/清理/主题设置；忽略 email）</span>
+        </label>
 
         <div class="form-field">
           <label class="form-label">
@@ -499,6 +517,60 @@
         <div style="display:flex;gap:8px;">
           <button class="btn" data-close-modal="editAccountModal" type="button">取消</button>
           <button id="btnSaveAccountEdit" class="btn btn-primary" type="button">保存修改</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 5: 清理本地邮件缓存 -->
+  <div id="cleanupEmailsModal" class="modal-backdrop hidden">
+    <div class="modal-panel" style="max-width:500px;">
+      <div class="modal-header">
+        <div>
+          <h3>🗑️ 清理本地邮件缓存 (IndexedDB)</h3>
+          <p>仅清理浏览器内已保存的历史邮件正文与摘要，不会删除已申请的邮箱账号与 Token</p>
+        </div>
+        <button class="btn-icon" data-close-modal="cleanupEmailsModal" type="button">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-field">
+          <label class="form-label">一键清理时间范围（根据邮件接收时间）</label>
+          <select id="selectCleanupAge" class="select">
+            <option value="1h">1 小时前</option>
+            <option value="24h">24 小时前</option>
+            <option value="3d">3 天前</option>
+            <option value="7d" selected>7 天前</option>
+            <option value="30d">30 天前</option>
+            <option value="all">全部本地邮件缓存</option>
+          </select>
+        </div>
+
+        <div id="cleanupPreviewText" style="padding:10px 12px;border-radius:8px;background:var(--bg-subtle);border:1px solid var(--border-color);font-size:12px;">
+          正在统计...
+        </div>
+
+        <div class="form-field" style="padding-top:6px;border-top:1px solid var(--border-color);">
+          <label class="form-label">
+            <span>定期自动清理</span>
+            <span class="form-hint">开启后页面启动及后台定时自动清理超期邮件</span>
+          </label>
+          <select id="selectAutoRetention" class="select">
+            <option value="off">关闭（仅手动一键清理）</option>
+            <option value="1h">自动保留最近 1 小时</option>
+            <option value="24h">自动保留最近 24 小时</option>
+            <option value="3d">自动保留最近 3 天</option>
+            <option value="7d">自动保留最近 7 天</option>
+            <option value="30d">自动保留最近 30 天</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnSaveAutoRetention" class="btn" type="button">仅保存定期设置</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" data-close-modal="cleanupEmailsModal" type="button">取消</button>
+          <button id="btnConfirmCleanupEmails" class="btn btn-danger" type="button">🗑️ 立即一键清理 (0)</button>
         </div>
       </div>
     </div>

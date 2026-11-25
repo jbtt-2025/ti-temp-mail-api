@@ -26,9 +26,10 @@
     switcherSearch: '',
     isPolling: false,
     pollTimerId: null,
+    retentionTimerId: null,
     runningJobs: 0,
     editingAccountId: null,
-    parsedImport: { accounts: [], errors: [] },
+    parsedImport: { accounts: [], settings: null, errors: [] },
   };
 
   function showToast(message, type = 'ok') {
@@ -948,6 +949,26 @@
   }
 
   // Import & Export
+  function updateImportSubmitState() {
+    const res = state.parsedImport;
+    const applySettings = Boolean(res.settings && el('chkImportApplySettings').checked);
+    const accCount = res.accounts.length;
+    el('btnConfirmImport').disabled = accCount === 0 && !applySettings;
+
+    if (applySettings && accCount > 0) {
+      el('btnConfirmImport').textContent = `确认导入 (配置 + ${accCount} 邮箱)`;
+      el('importFooterHint').textContent = `准备应用前端配置并导入 ${accCount} 个邮箱凭证（忽略 email）`;
+    } else if (applySettings) {
+      el('btnConfirmImport').textContent = '确认导入 (仅前端配置)';
+      el('importFooterHint').textContent = '准备导入并应用前端配置（不含邮箱）';
+    } else {
+      el('btnConfirmImport').textContent = `确认导入 (${accCount})`;
+      el('importFooterHint').textContent = accCount > 0
+        ? `准备导入 ${accCount} 个邮箱凭证（忽略 email）`
+        : '请上传 .jsonl / .json 文件或粘贴内容';
+    }
+  }
+
   function refreshImportPreview() {
     const text = el('inputImportText').value;
     const defaultUpstream = el('inputImportDefaultUpstream').value || state.settings.upstreamUrl;
@@ -955,12 +976,20 @@
     const res = core.parseJsonlImport(text, { defaultUpstream, defaultToken });
     state.parsedImport = res;
 
-    el('importParseStat').textContent = `已解析 ${res.accounts.length} 个账号`;
-    el('btnConfirmImport').textContent = `确认导入 (${res.accounts.length})`;
-    el('btnConfirmImport').disabled = res.accounts.length === 0;
-    el('importFooterHint').textContent = res.accounts.length > 0
-      ? `准备导入 ${res.accounts.length} 个邮箱凭证`
-      : '请上传 .jsonl 文件或粘贴内容';
+    el('importParseStat').textContent = `${res.settings ? '含前端配置 · ' : ''}已解析 ${res.accounts.length} 个账号`;
+
+    const settingsBox = el('importSettingsNotice');
+    if (res.settings) {
+      const domains = core.parseDomainsInput(res.settings.domainsRaw);
+      el('importSettingsSummary').textContent =
+        `上游: ${res.settings.upstreamUrl} · TOKEN: ${res.settings.createToken ? '已设置' : '空'} · 域名(${domains.length}): ${domains.join(', ') || '服务端默认'} · 策略: ${strategyDisplayName(res.settings.domainStrategy, domains)}`;
+      settingsBox.classList.remove('hidden');
+    } else {
+      settingsBox.classList.add('hidden');
+      el('importSettingsSummary').textContent = '';
+    }
+
+    updateImportSubmitState();
 
     const errBox = el('importErrorsBox');
     if (res.errors.length > 0) {
@@ -990,9 +1019,24 @@
     }
   }
 
+  function applyImportedSettings(imported) {
+    if (!imported || typeof imported !== 'object') return;
+    state.settings = core.normalizeSettings(imported, core.DEFAULT_SETTINGS);
+    applyDarkMode();
+    syncCreateModalFromSettings();
+    saveCurrentSettings();
+    updatePollingTimer();
+    updateRetentionTimer();
+  }
+
   async function confirmImportAccounts() {
-    const items = state.parsedImport.accounts;
-    if (!items || items.length === 0) return;
+    const items = state.parsedImport.accounts || [];
+    const applySettings = Boolean(state.parsedImport.settings && el('chkImportApplySettings').checked);
+    if (items.length === 0 && !applySettings) return;
+
+    if (applySettings) {
+      applyImportedSettings(state.parsedImport.settings);
+    }
 
     const strategy = el('selectImportDedup').value;
     const extraTags = el('inputImportTags').value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
@@ -1034,11 +1078,21 @@
       }
     }
 
-    state.accounts = Array.from(existingMap.values());
-    await state.db.putAccountsBulk(importedOrUpdated);
+    if (items.length > 0) {
+      state.accounts = Array.from(existingMap.values());
+      await state.db.putAccountsBulk(importedOrUpdated);
+    }
+
     closeModal('importModal');
     renderAll();
-    showToast(`成功导入 ${importedOrUpdated.length} 个邮箱`, 'ok');
+
+    if (applySettings && items.length > 0) {
+      showToast(`已恢复前端配置并导入 ${importedOrUpdated.length} 个邮箱`, 'ok');
+    } else if (applySettings) {
+      showToast('已导入并应用前端配置', 'ok');
+    } else {
+      showToast(`成功导入 ${importedOrUpdated.length} 个邮箱`, 'ok');
+    }
 
     if (autoSync && importedOrUpdated.length > 0) {
       syncManyAccounts(importedOrUpdated, { silent: true });
@@ -1048,41 +1102,35 @@
   function buildExportData() {
     const scope = el('selectExportScope').value;
     const format = el('selectExportFormat').value;
+    const supportsSettings = format === 'jsonl' || format === 'json';
+    const chkSettings = el('chkExportIncludeSettings');
+    chkSettings.disabled = !supportsSettings;
+    const includeSettings = supportsSettings && chkSettings.checked;
+
     let target = state.accounts;
     if (scope === 'active') target = state.accounts.filter((a) => a.status === 'active');
     else if (scope === 'empty') target = state.accounts.filter((a) => a.status === 'empty' || a.status === 'idle');
     else if (scope === 'expired') target = state.accounts.filter((a) => a.status === 'expired');
     else if (scope === 'selected') target = state.accounts.filter((a) => state.selectedAccountIds.has(a.id));
 
-    let content = '';
-    if (target.length > 0) {
-      if (format === 'jsonl') {
-        content = core.serializeJsonl(target);
-      } else if (format === 'json') {
-        content = JSON.stringify(target.map((a) => ({
-          upstream: a.upstream,
-          token: a.token || '',
-          mail: a.mail,
-          mail_token: a.mail_token || '',
-          mode: a.mode || 'maindomain',
-          tags: a.tags || [],
-          created_at: a.created_at || Date.now(),
-        })), null, 2);
-      } else if (format === 'delim') {
-        content = target.map((a) => `${a.upstream}----${a.token || ''}----${a.mail}----${a.mail_token || ''}`).join('\n');
-      } else {
-        content = target.map((a) => a.mail).join('\n');
-      }
-    }
+    const content = core.serializeExportData({
+      accounts: target,
+      settings: state.settings,
+      includeSettings,
+      format,
+    });
 
     const extMap = { jsonl: 'jsonl', json: 'json', delim: 'txt', mail_only: 'txt' };
-    el('exportPreviewCount').textContent = `数据预览（${target.length} 条）：`;
+    const lineCount = content ? content.split('\n').length : 0;
+    el('exportPreviewCount').textContent = `数据预览（${lineCount} 行，不含 email）：`;
     el('exportFormatLabel').textContent = format.toUpperCase();
-    el('exportFooterCount').textContent = `共 ${target.length} 个凭据`;
+    el('exportFooterCount').textContent = includeSettings
+      ? `前端配置 + ${target.length} 个凭据`
+      : `共 ${target.length} 个凭据`;
     el('textareaExportPreview').value = content;
-    el('btnCopyExport').disabled = target.length === 0;
-    el('btnDownloadExport').disabled = target.length === 0;
-    return { content, ext: extMap[format] || 'jsonl', scope };
+    el('btnCopyExport').disabled = !content;
+    el('btnDownloadExport').disabled = !content;
+    return { content, ext: extMap[format] || 'jsonl', scope, includeSettings, count: target.length };
   }
 
   function openModal(id) {
@@ -1094,6 +1142,9 @@
       refreshImportPreview();
     } else if (id === 'exportModal') {
       buildExportData();
+    } else if (id === 'cleanupEmailsModal') {
+      el('selectAutoRetention').value = state.settings.emailRetention || 'off';
+      refreshCleanupModalPreview();
     }
     el(id).classList.remove('hidden');
   }
@@ -1158,6 +1209,60 @@
     }
   }
 
+  function refreshCleanupModalPreview() {
+    const ageKey = el('selectCleanupAge').value;
+    const { kept, removed } = core.partitionEmailsForCleanup(state.emails, ageKey);
+    const total = state.emails.length;
+    el('cleanupPreviewText').innerHTML =
+      `当前本地共保存 <b>${total}</b> 封邮件，将清理 <b style="color:var(--text-rose);">${removed.length}</b> 封，清理后保留 <b>${kept.length}</b> 封。`;
+    const btn = el('btnConfirmCleanupEmails');
+    btn.textContent = `🗑️ 立即一键清理 (${removed.length})`;
+    btn.disabled = removed.length === 0;
+  }
+
+  async function executeEmailCleanup(ageKey, { silent = false } = {}) {
+    const { kept, removed, removedUids } = core.partitionEmailsForCleanup(state.emails, ageKey);
+    if (removed.length === 0) {
+      if (!silent) showToast('没有符合清理条件的本地邮件', 'warn');
+      return 0;
+    }
+
+    if (ageKey === 'all') {
+      await state.db.clearAllEmails();
+      state.emails = [];
+      state.selectedEmailUid = null;
+    } else {
+      await state.db.deleteEmailsBulk(removedUids);
+      state.emails = kept;
+      if (state.selectedEmailUid && removedUids.includes(state.selectedEmailUid)) {
+        state.selectedEmailUid = null;
+      }
+    }
+
+    renderAll();
+    if (!silent) {
+      showToast(`已清理 ${removed.length} 封本地邮件缓存`, 'ok');
+    }
+    return removed.length;
+  }
+
+  function updateRetentionTimer() {
+    if (state.retentionTimerId) {
+      clearInterval(state.retentionTimerId);
+      state.retentionTimerId = null;
+    }
+    const retention = state.settings.emailRetention || 'off';
+    if (retention !== 'off') {
+      executeEmailCleanup(retention, { silent: true });
+      state.retentionTimerId = setInterval(() => {
+        const cur = state.settings.emailRetention || 'off';
+        if (cur !== 'off') {
+          executeEmailCleanup(cur, { silent: true });
+        }
+      }, 60 * 60 * 1000);
+    }
+  }
+
   function updatePollingTimer() {
     if (state.pollTimerId) {
       clearInterval(state.pollTimerId);
@@ -1194,6 +1299,8 @@
     el('btnSidebarImport').addEventListener('click', () => openModal('importModal'));
     el('btnTopExport').addEventListener('click', () => openModal('exportModal'));
     el('btnSidebarExport').addEventListener('click', () => openModal('exportModal'));
+    el('btnOpenCleanupEmails').addEventListener('click', () => openModal('cleanupEmailsModal'));
+    el('btnQuickCleanupEmails').addEventListener('click', () => openModal('cleanupEmailsModal'));
 
     el('btnToggleDark').addEventListener('click', () => {
       state.settings.darkMode = !state.settings.darkMode;
@@ -1531,29 +1638,62 @@
     ['inputImportText', 'inputImportDefaultUpstream', 'inputImportDefaultToken'].forEach((id) => {
       el(id).addEventListener('input', refreshImportPreview);
     });
+    el('chkImportApplySettings').addEventListener('change', updateImportSubmitState);
     el('btnConfirmImport').addEventListener('click', confirmImportAccounts);
 
     // Export modal interactions
     el('selectExportScope').addEventListener('change', buildExportData);
     el('selectExportFormat').addEventListener('change', buildExportData);
+    el('chkExportIncludeSettings').addEventListener('change', buildExportData);
     el('btnCopyExport').addEventListener('click', () => {
       const { content } = buildExportData();
       if (content) copyText(content, '导出数据');
     });
     el('btnDownloadExport').addEventListener('click', () => {
-      const { content, ext, scope } = buildExportData();
+      const { content, ext, scope, count, includeSettings } = buildExportData();
       if (!content) return;
       const dateStr = new Date().toISOString().slice(0, 10);
       const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `tempmail_accounts_${scope}_${dateStr}.${ext}`;
+      a.download = count === 0 && includeSettings
+        ? `tempmail_config_${dateStr}.${ext}`
+        : `tempmail_backup_${scope}_${dateStr}.${ext}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
       showToast(`已下载 ${a.download}`, 'ok');
+    });
+
+    // Cleanup emails modal interactions
+    el('selectCleanupAge').addEventListener('change', refreshCleanupModalPreview);
+    el('btnSaveAutoRetention').addEventListener('click', () => {
+      state.settings.emailRetention = el('selectAutoRetention').value || 'off';
+      saveCurrentSettings();
+      updateRetentionTimer();
+      closeModal('cleanupEmailsModal');
+      showToast(
+        state.settings.emailRetention === 'off'
+          ? '已关闭定期自动清理'
+          : `已启用定期保留最近 ${el('selectAutoRetention').selectedOptions[0].textContent.replace('自动保留最近 ', '')}`,
+        'ok'
+      );
+    });
+    el('btnConfirmCleanupEmails').addEventListener('click', async () => {
+      const ageKey = el('selectCleanupAge').value;
+      const newRetention = el('selectAutoRetention').value || 'off';
+      if (newRetention !== state.settings.emailRetention) {
+        state.settings.emailRetention = newRetention;
+        saveCurrentSettings();
+        updateRetentionTimer();
+      }
+      await executeEmailCleanup(ageKey, { silent: false });
+      refreshCleanupModalPreview();
+      if (state.emails.length === 0) {
+        closeModal('cleanupEmailsModal');
+      }
     });
 
     // Edit Account modal interactions
@@ -1573,6 +1713,7 @@
 
     syncCreateModalFromSettings();
     bindEvents();
+    updateRetentionTimer();
     renderAll();
   }
 

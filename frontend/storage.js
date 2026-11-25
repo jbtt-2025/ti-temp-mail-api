@@ -7,31 +7,14 @@
   const DB_VERSION = 1;
 
   function defaultSettings() {
-    return {
-      upstreamUrl: core.DEFAULT_UPSTREAM_URL,
-      createToken: '',
-      domainsRaw: '',
-      domainStrategy: 'rotate',
-      mailMode: 'maindomain',
-      batchCount: 1,
-      batchTags: '',
-      rotateCursor: 0,
-      pollInterval: 30,
-      concurrency: 3,
-      darkMode: false,
-    };
+    return { ...core.DEFAULT_SETTINGS };
   }
 
   function loadSettings() {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
       if (!raw) return defaultSettings();
-      const parsed = JSON.parse(raw);
-      return {
-        ...defaultSettings(),
-        ...parsed,
-        upstreamUrl: core.normalizeUpstreamUrl(parsed.upstreamUrl || core.DEFAULT_UPSTREAM_URL),
-      };
+      return core.normalizeSettings(JSON.parse(raw), core.DEFAULT_SETTINGS);
     } catch {
       return defaultSettings();
     }
@@ -197,6 +180,28 @@
       }
       const tx = this.db.transaction('emails', 'readwrite');
       tx.objectStore('emails').delete(uid);
+      await txDone(tx);
+    }
+
+    async deleteEmailsBulk(uids) {
+      if (!uids || uids.length === 0) return;
+      if (this.usingFallback || !this.db) {
+        uids.forEach((uid) => this.memEmails.delete(uid));
+        return;
+      }
+      const tx = this.db.transaction('emails', 'readwrite');
+      const store = tx.objectStore('emails');
+      uids.forEach((uid) => store.delete(uid));
+      await txDone(tx);
+    }
+
+    async clearAllEmails() {
+      if (this.usingFallback || !this.db) {
+        this.memEmails.clear();
+        return;
+      }
+      const tx = this.db.transaction('emails', 'readwrite');
+      tx.objectStore('emails').clear();
       await txDone(tx);
     }
   }
